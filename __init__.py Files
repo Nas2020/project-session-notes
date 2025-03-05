@@ -1,0 +1,11 @@
+# config/__init__.py
+"""Configuration package for the Adracare import tool."""
+
+# api/__init__.py
+"""API interaction package for the Adracare import tool."""
+
+# db/__init__.py
+"""Database operations package for the Adracare import tool."""
+
+# utils/__init__.py
+"""Utility functions for the Adracare import tool."""
