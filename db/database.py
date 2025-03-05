@@ -230,7 +230,7 @@ class Database:
                     "warning": f"Could not find local patient ID for Adracare patient ID: {adracare_patient_id}"
                 }))
                 return inserted_timestamps
-                
+            
             cursor = self.conn.cursor()
             
             sql = """
@@ -239,10 +239,11 @@ class Database:
             """
             
             for note in notes_data:
-                note_text = extract_text_from_html(note.get("notes", ""))
-                created_at = note.get("created_at")  # Directly from response
-                updated_at = note.get("updated_at")  # Directly from response
-                adracare_account_id = note.get("created_by_account_id")
+                attributes = note.get("attributes", {})  # Access nested attributes
+                note_text = extract_text_from_html(attributes.get("notes", ""))
+                created_at = attributes.get("created_at")  # Directly from response
+                updated_at = attributes.get("updated_at")  # Directly from response
+                adracare_account_id = attributes.get("created_by_account_id")
                 
                 # Look up the local author ID
                 author_id = self.get_local_author_id(adracare_account_id)
