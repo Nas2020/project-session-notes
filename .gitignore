@@ -5,3 +5,4 @@ venv/
 __pycache__/
 results.json
 todel.json
+provider-logs.json
