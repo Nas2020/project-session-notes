@@ -224,6 +224,9 @@ def process_patient(db, api_base_url, auth_token, patient_id, default_author_id)
 
 def main():
     """Main execution function for the import script."""
+    # Load configuration
+    config = load_config()
+    
     # Initialize results structure
     results = {
         "timestamp": datetime.now().isoformat(),
@@ -231,7 +234,7 @@ def main():
     }
     
     # Initialize database connection
-    db = Database({"host": "localhost", "port": 5432, "database": "rocketdoctor_development", "user": "postgres", "password": ""})
+    db = Database(config["db_config"])
     
     try:
         # Connect to database
