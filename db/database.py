@@ -323,7 +323,7 @@ class Database:
             
             sql = """
             INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
-            VALUES (%s, %s, %s, %s::text, %s::text);
+            VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC');
             """
             
             for note in notes_data:
