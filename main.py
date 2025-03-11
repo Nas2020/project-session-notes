@@ -227,11 +227,21 @@ def main():
     # Load configuration
     config = load_config()
     
-    # Initialize results structure
-    results = {
-        "timestamp": datetime.now().isoformat(),
-        "patients": []
-    }
+    # Initialize results structure - or load existing one if it exists
+    results_file = "results.json"
+    try:
+        with open(results_file, "r") as infile:
+            results = json.load(infile)
+            # Add timestamp for this run
+            results["last_run"] = datetime.now().isoformat()
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Create new results if file doesn't exist or is invalid
+        results = {
+            "first_run": datetime.now().isoformat(),
+            "last_run": datetime.now().isoformat(),
+            "patients": {},
+            "imported_notes": {}  # Track by note ID
+        }
     
     # Initialize database connection
     db = Database(config["db_config"])
@@ -258,29 +268,79 @@ def main():
         for patient_id in config["patient_ids"]:
             print(f"\n=== Processing patient {patient_id} ===")
             
-            patient_result = process_patient(
-                db,
-                config["api_base_url"],
-                auth_token,
-                patient_id,
-                config["default_author_id"]
+            # Initialize patient in results if not present
+            if patient_id not in results["patients"]:
+                results["patients"][patient_id] = []
+            
+            # Get encounter notes
+            encounter_notes_response = get_encounter_notes(
+                config["api_base_url"], 
+                auth_token, 
+                patient_id
             )
             
-            results["patients"].append(patient_result)
+            notes_data = extract_notes_data(encounter_notes_response)
+            print(f"Found {len(notes_data)} encounter notes for {patient_id}.")
+            
+            # Filter out already imported notes
+            new_notes = []
+            for note in notes_data:
+                note_id = note.get("id")
+                if note_id not in results["imported_notes"]:
+                    new_notes.append(note)
+                else:
+                    print(f"Note {note_id} already imported, skipping.")
+            
+            print(f"Found {len(new_notes)} new notes to import.")
+            
+            # Process new notes
+            if new_notes:
+                inserted_records = db.insert_notes(
+                    new_notes, 
+                    patient_id, 
+                    config["default_author_id"]
+                )
+                
+                # Record imported notes
+                for i, note in enumerate(new_notes):
+                    note_id = note.get("id")
+                    if i < len(inserted_records):  # Ensure we have records
+                        created_at, db_id = inserted_records[i]
+                        results["imported_notes"][note_id] = {
+                            "patient_id": patient_id,
+                            "created_at": note.get("created_at"),
+                            "imported_at": datetime.now().isoformat(),
+                            "db_id": db_id  # Store the database ID
+                        }
+                        # Add to this run's patient results
+                        results["patients"][patient_id].append({
+                            "note_id": note_id,
+                            "created_at": note.get("created_at"),
+                            "imported_at": datetime.now().isoformat(),
+                            "db_id": db_id  # Store the database ID
+                        })
+                
+                print(f"Successfully inserted {len(inserted_records)} notes into the database.")
+            else:
+                print("No new notes to insert.")
     
     except Exception as e:
         print(f"Error: {e}")
-        results["error"] = str(e)
+        if "errors" not in results:
+            results["errors"] = []
+        results["errors"].append({
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        })
     
     finally:
         db.close()
     
     # Write results to JSON file
-    with open("results.json", "w") as outfile:
+    with open(results_file, "w") as outfile:
         json.dump(results, outfile, indent=2)
     
-    print("\nAll processing complete. See 'results.json' for detailed logs.")
-
+    print(f"\nAll processing complete. See '{results_file}' for detailed logs.")
 
 if __name__ == "__main__":
     main()

@@ -116,7 +116,7 @@
             
 #             sql = """
 #             INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
-#             VALUES (%s, %s, %s, %s, %s);
+#             VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC');
 #             """
             
 #             for note in notes_data:
@@ -204,6 +204,7 @@
 #         except Exception as e:
 #             print(json.dumps({"error": f"Error fetching external ID for patient {patient_id}: {e}"}))
 #             return None
+
 
 import psycopg2
 import json
@@ -303,9 +304,9 @@ class Database:
             default_author_id (int): Default author user ID (kept for compatibility)
             
         Returns:
-            list: Created_at timestamps for each inserted note
+            list: Tuples of (created_at, db_id) for each inserted note
         """
-        inserted_timestamps = []
+        inserted_records = []
         try:
             # Log the input data for debugging
             print(json.dumps({"debug": "Notes data received", "notes_data": [str(note) for note in notes_data]}))
@@ -317,13 +318,15 @@ class Database:
                 print(json.dumps({
                     "warning": f"Could not find local patient ID for Adracare patient ID: {adracare_patient_id}"
                 }))
-                return inserted_timestamps
+                return inserted_records
             
             cursor = self.conn.cursor()
             
+            # Modified SQL to return the ID
             sql = """
             INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
-            VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC');
+            VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC')
+            RETURNING id;
             """
             
             for note in notes_data:
@@ -348,7 +351,7 @@ class Database:
                         print(json.dumps({
                             "warning": f"No user found for adracare_account_id: {adracare_account_id}"
                         }))
-                        return inserted_timestamps
+                        return inserted_records
 
                 cursor.execute(sql, (
                     note_text,
@@ -358,16 +361,18 @@ class Database:
                     updated_at
                 ))
                 
-                inserted_timestamps.append(created_at)
-            
+                # Get the ID of the inserted row
+                db_id = cursor.fetchone()[0]
+                inserted_records.append((created_at, db_id))
+                
             self.conn.commit()
         except Exception as e:
             print(json.dumps({"error": f"Database error: {e}"}))
             if self.conn:
                 self.conn.rollback()
         
-        return inserted_timestamps
-    
+        return inserted_records
+   
     def get_patient_ids_by_provider(self, provider_id):
         """
         Fetch unique patient IDs associated with a provider from the appointments table.
