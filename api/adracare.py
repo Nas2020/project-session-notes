@@ -163,7 +163,7 @@ def extract_notes_data(encounter_notes_response):
             "created_at": attributes.get("created_at"),
             "updated_at": attributes.get("updated_at"),
             "patient_id": attributes.get("patient_id"),
-            "created_by_account_id": attributes.get("created_by_account_id")  # Add this field
+            "created_by_account_id": attributes.get("created_by_account_id")
         }
         notes_data.append(note_data)
     
