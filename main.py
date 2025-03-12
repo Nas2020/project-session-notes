@@ -163,19 +163,30 @@ and imports them into a local PostgreSQL database.
 """
 import json
 from datetime import datetime
-
 from config.settings import load_config
 from api.adracare import get_auth_token, get_encounter_notes, extract_notes_data
 from db.database import Database
 
-
 def process_patient(db, api_base_url, auth_token, patient_id, default_author_id):
-    # [Unchanged from your version]
+    """
+    Process encounter notes for a single patient.
+    
+    Args:
+        db (Database): Database connection handler
+        api_base_url (str): Adracare API base URL
+        auth_token (str): Authentication token for Adracare API
+        patient_id (str): External patient ID from Adracare
+        default_author_id (int): Default author user ID (used only when created_by_account_id is None)
+        
+    Returns:
+        dict: Results of patient processing
+    """
+    # Initialize result structure
     patient_result = {
         "patient_id": patient_id,
         "messages": [],
         "notes_found": 0,
-        "inserted_notes": []
+        "processed_notes": []
     }
     
     msg = f"Fetching encounter notes for patient {patient_id}..."
@@ -192,24 +203,24 @@ def process_patient(db, api_base_url, auth_token, patient_id, default_author_id)
         patient_result["notes_found"] = len(notes_data)
         
         if notes_data:
-            insert_msg = "Inserting notes into local database..."
-            print(insert_msg)
-            patient_result["messages"].append(insert_msg)
+            sql_gen_msg = "Generating SQL statements for notes..."
+            print(sql_gen_msg)
+            patient_result["messages"].append(sql_gen_msg)
             
-            inserted_timestamps = db.insert_notes(notes_data, patient_id, default_author_id, "output.sql")
+            processed_records = db.generate_notes_sql(notes_data, patient_id, default_author_id, "output.sql")
             
-            for ts in inserted_timestamps:
-                note_msg = f"Inserted note created on {ts}"
+            for created_at, _ in processed_records:
+                note_msg = f"Generated SQL for note created on {created_at}"
                 print(note_msg)
                 patient_result["messages"].append(note_msg)
             
-            patient_result["inserted_notes"] = inserted_timestamps
+            patient_result["processed_notes"] = processed_records
             
-            success_msg = f"Successfully inserted {len(inserted_timestamps)} notes into the database."
+            success_msg = f"Successfully generated SQL for {len(processed_records)} notes."
             print(success_msg)
             patient_result["messages"].append(success_msg)
         else:
-            no_notes_msg = "No notes to insert."
+            no_notes_msg = "No notes to process."
             print(no_notes_msg)
             patient_result["messages"].append(no_notes_msg)
     
@@ -220,7 +231,6 @@ def process_patient(db, api_base_url, auth_token, patient_id, default_author_id)
         patient_result["error"] = str(e)
     
     return patient_result
-
 
 def main():
     """Main execution function for the import script."""
@@ -240,14 +250,14 @@ def main():
             "first_run": datetime.now().isoformat(),
             "last_run": datetime.now().isoformat(),
             "patients": {},
-            "imported_notes": {}  # Track by note ID
+            "processed_notes": {}  # Track by note ID
         }
     
     # Initialize database connection
     db = Database(config["db_config"])
     
     try:
-        # Connect to database
+        # Connect to database (for lookups only, not for insertions)
         if not db.connect():
             raise Exception("Failed to connect to the database")
         
@@ -282,47 +292,47 @@ def main():
             notes_data = extract_notes_data(encounter_notes_response)
             print(f"Found {len(notes_data)} encounter notes for {patient_id}.")
             
-            # Filter out already imported notes
+            # Filter out already processed notes
             new_notes = []
             for note in notes_data:
                 note_id = note.get("id")
-                if note_id not in results["imported_notes"]:
+                if note_id not in results["processed_notes"]:
                     new_notes.append(note)
                 else:
-                    print(f"Note {note_id} already imported, skipping.")
+                    print(f"Note {note_id} already processed, skipping.")
             
-            print(f"Found {len(new_notes)} new notes to import.")
+            print(f"Found {len(new_notes)} new notes to process.")
             
             # Process new notes
             if new_notes:
-                inserted_records = db.insert_notes(
+                processed_records = db.generate_notes_sql(
                     new_notes, 
                     patient_id, 
                     config["default_author_id"]
                 )
                 
-                # Record imported notes
+                # Record processed notes
                 for i, note in enumerate(new_notes):
                     note_id = note.get("id")
-                    if i < len(inserted_records):  # Ensure we have records
-                        created_at, db_id = inserted_records[i]
-                        results["imported_notes"][note_id] = {
+                    if i < len(processed_records):  # Ensure we have records
+                        created_at, _ = processed_records[i]
+                        results["processed_notes"][note_id] = {
                             "patient_id": patient_id,
                             "created_at": note.get("created_at"),
-                            "imported_at": datetime.now().isoformat(),
-                            "db_id": db_id  # Store the database ID
+                            "processed_at": datetime.now().isoformat(),
+                            "sql_generated": True
                         }
                         # Add to this run's patient results
                         results["patients"][patient_id].append({
                             "note_id": note_id,
                             "created_at": note.get("created_at"),
-                            "imported_at": datetime.now().isoformat(),
-                            "db_id": db_id  # Store the database ID
+                            "processed_at": datetime.now().isoformat(),
+                            "sql_generated": True
                         })
                 
-                print(f"Successfully inserted {len(inserted_records)} notes into the database.")
+                print(f"Successfully generated SQL for {len(processed_records)} notes.")
             else:
-                print("No new notes to insert.")
+                print("No new notes to process.")
     
     except Exception as e:
         print(f"Error: {e}")

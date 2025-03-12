@@ -417,7 +417,6 @@
         #     print(json.dumps({"error": f"Error fetching external ID for patient {patient_id}: {e}"}))
         #     return None
         
-        
 import psycopg2
 import json
 from utils.text_processing import extract_text_from_html
@@ -506,20 +505,20 @@ class Database:
             print(json.dumps({"error": f"Error finding local author ID: {e}"}))
             return None
     
-    def insert_notes(self, notes_data, adracare_patient_id, default_author_id, output_file_path="output.sql"):
+    def generate_notes_sql(self, notes_data, adracare_patient_id, default_author_id, output_file_path="output.sql"):
         """
-        Write SQL insert statements for processed notes to an output file.
+        Generate SQL insert statements for notes and write them to an output file.
         
         Args:
             notes_data (list): List of note dictionaries from Adracare
             adracare_patient_id (str): Patient ID from Adracare
-            default_author_id (int): Default author user ID (kept for compatibility)
+            default_author_id (int): Default author user ID (used only when created_by_account_id is None)
             output_file_path (str): Path to the output file where SQL statements will be written
                 
         Returns:
-            list: Tuples of (created_at, db_id) for each note (db_id will be None since no insertion is done)
+            list: Tuples of (created_at, None) for each processed note
         """
-        inserted_records = []
+        processed_records = []
         try:
             # Log the input data for debugging
             print(json.dumps({"debug": "Notes data received", "notes_data": [str(note) for note in notes_data]}))
@@ -531,59 +530,67 @@ class Database:
                 print(json.dumps({
                     "warning": f"Could not find local patient ID for Adracare patient ID: {adracare_patient_id}"
                 }))
-                return inserted_records
+                return processed_records
             
             # Open the output file to write SQL statements
             with open(output_file_path, "w") as sql_file:
-                # SQL template for insertion
+                # Modified SQL to return the ID (not executed, just written to file)
                 sql_template = """
                 INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
-                VALUES ('{notes}', {patient_id}, {author_id}, '{created_at}' AT TIME ZONE 'UTC', '{updated_at}' AT TIME ZONE 'UTC');
+                VALUES ('{notes}', {patient_id}, {author_id}, '{created_at}' AT TIME ZONE 'UTC', '{updated_at}' AT TIME ZONE 'UTC')
+                RETURNING id;
                 """
                 
                 for note in notes_data:
-                    # Access fields directly from the flat dictionary
-                    note_text = extract_text_from_html(note.get("notes", ""))
-                    created_at = note.get("created_at")
-                    updated_at = note.get("updated_at")
-                    adracare_account_id = note.get("created_by_account_id")
-                    
-                    # Log the note for debugging
-                    print(json.dumps({"debug": "Processing note", "note": note}))
-
-                    # Handle missing created_by_account_id
-                    if adracare_account_id is None:
-                        print(json.dumps({
-                            "warning": f"Missing created_by_account_id for note, using default_author_id: {default_author_id}"
-                        }))
-                        author_id = default_author_id
-                    else:
-                        author_id = self.get_local_author_id(adracare_account_id)
-                        if not author_id:
+                    try:
+                        # Access fields directly from the flat dictionary
+                        note_text = extract_text_from_html(note.get("notes", ""))
+                        created_at = note.get("created_at")
+                        updated_at = note.get("updated_at")
+                        adracare_account_id = note.get("created_by_account_id")
+                        
+                        # Log the note for debugging
+                        print(json.dumps({"debug": "Processing note", "note": note}))
+    
+                        # Handle missing created_by_account_id
+                        if adracare_account_id is None:
                             print(json.dumps({
-                                "warning": f"No user found for adracare_account_id: {adracare_account_id}"
+                                "warning": f"Missing created_by_account_id for note, using default_author_id: {default_author_id}"
                             }))
-                            continue  # Skip this note and proceed to the next one
-
-                    # Format the SQL statement
-                    sql_statement = sql_template.format(
-                        notes=note_text.replace("'", "''"),  # Escape single quotes
-                        patient_id=local_patient_id,
-                        author_id=author_id,
-                        created_at=created_at,
-                        updated_at=updated_at
-                    )
+                            author_id = default_author_id
+                        else:
+                            author_id = self.get_local_author_id(adracare_account_id)
+                            if not author_id:
+                                print(json.dumps({
+                                    "warning": f"No user found for adracare_account_id: {adracare_account_id}"
+                                }))
+                                # Skip this note but continue processing others
+                                continue
+    
+                        # Format the SQL statement
+                        sql_statement = sql_template.format(
+                            notes=note_text.replace("'", "''"),  # Escape single quotes
+                            patient_id=local_patient_id,
+                            author_id=author_id,
+                            created_at=created_at,
+                            updated_at=updated_at
+                        )
+                        
+                        # Write the SQL statement to the file
+                        sql_file.write(sql_statement + "\n")
+                        
+                        # Append the record with a placeholder db_id (since no insertion is done)
+                        processed_records.append((created_at, None))
                     
-                    # Write the SQL statement to the file
-                    sql_file.write(sql_statement + "\n")
-                    
-                    # Append the record with a placeholder db_id (since no insertion is done)
-                    inserted_records.append((created_at, None))
+                    except Exception as e:
+                        print(json.dumps({"error": f"Error processing note: {e}"}))
+                        # Continue processing other notes
+                        continue
                     
         except Exception as e:
-            print(json.dumps({"error": f"Error writing SQL statements: {e}"}))
+            print(json.dumps({"error": f"Error generating SQL statements: {e}"}))
         
-        return inserted_records
+        return processed_records
    
     def get_patient_ids_by_provider(self, provider_id):
         """
@@ -609,7 +616,7 @@ class Database:
 
     def get_external_id_by_patient_id(self, patient_id):
         """
-        Find the external ID (Adracare ID) based on the local patient ID.
+        Get the external ID for a patient.
         
         Args:
             patient_id (int): Local patient ID
@@ -624,9 +631,7 @@ class Database:
                 (patient_id,)
             )
             result = cursor.fetchone()
-            if result:
-                return result[0]
-            return None
+            return result[0] if result else None
         except Exception as e:
-            print(json.dumps({"error": f"Error finding external ID for patient {patient_id}: {e}"}))
+            print(json.dumps({"error": f"Error fetching external ID for patient {patient_id}: {e}"}))
             return None
