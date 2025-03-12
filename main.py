@@ -196,7 +196,7 @@ def process_patient(db, api_base_url, auth_token, patient_id, default_author_id)
             print(insert_msg)
             patient_result["messages"].append(insert_msg)
             
-            inserted_timestamps = db.insert_notes(notes_data, patient_id, default_author_id)
+            inserted_timestamps = db.insert_notes(notes_data, patient_id, default_author_id, "output.sql")
             
             for ts in inserted_timestamps:
                 note_msg = f"Inserted note created on {ts}"

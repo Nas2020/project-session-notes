@@ -1,0 +1,15 @@
+{
+  "timestamp": "2025-03-06T23:07:31.925454",
+  "patients": [
+    {
+      "patient_id": "542938e5-e7a3-43da-af29-8962d0fa0ba2",
+      "messages": [
+        "Fetching encounter notes for patient 542938e5-e7a3-43da-af29-8962d0fa0ba2...",
+        "Found 0 encounter notes for 542938e5-e7a3-43da-af29-8962d0fa0ba2.",
+        "No notes to insert."
+      ],
+      "notes_found": 0,
+      "inserted_notes": []
+    }
+  ]
+}

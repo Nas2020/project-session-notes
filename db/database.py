@@ -294,17 +294,18 @@ class Database:
             print(json.dumps({"error": f"Error finding local author ID: {e}"}))
             return None
     
-    def insert_notes(self, notes_data, adracare_patient_id, default_author_id):
+    def insert_notes(self, notes_data, adracare_patient_id, default_author_id, output_file_path="output.sql"):
         """
-        Insert processed notes into the database.
+        Write SQL insert statements for processed notes to an output file.
         
         Args:
             notes_data (list): List of note dictionaries from Adracare
             adracare_patient_id (str): Patient ID from Adracare
             default_author_id (int): Default author user ID (kept for compatibility)
-            
+            output_file_path (str): Path to the output file where SQL statements will be written
+                
         Returns:
-            list: Tuples of (created_at, db_id) for each inserted note
+            list: Tuples of (created_at, db_id) for each note (db_id will be None since no insertion is done)
         """
         inserted_records = []
         try:
@@ -320,56 +321,56 @@ class Database:
                 }))
                 return inserted_records
             
-            cursor = self.conn.cursor()
-            
-            # Modified SQL to return the ID
-            sql = """
-            INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
-            VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC')
-            RETURNING id;
-            """
-            
-            for note in notes_data:
-                # Access fields directly from the flat dictionary
-                note_text = extract_text_from_html(note.get("notes", ""))
-                created_at = note.get("created_at")
-                updated_at = note.get("updated_at")
-                adracare_account_id = note.get("created_by_account_id")
+            # Open the output file to write SQL statements
+            with open(output_file_path, "w") as sql_file:
+                # Modified SQL to return the ID (not executed, just written to file)
+                sql_template = """
+                INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
+                VALUES ('{notes}', {patient_id}, {author_id}, '{created_at}' AT TIME ZONE 'UTC', '{updated_at}' AT TIME ZONE 'UTC')
+                RETURNING id;
+                """
                 
-                # Log the note for debugging
-                print(json.dumps({"debug": "Processing note", "note": note}))
+                for note in notes_data:
+                    # Access fields directly from the flat dictionary
+                    note_text = extract_text_from_html(note.get("notes", ""))
+                    created_at = note.get("created_at")
+                    updated_at = note.get("updated_at")
+                    adracare_account_id = note.get("created_by_account_id")
+                    
+                    # Log the note for debugging
+                    print(json.dumps({"debug": "Processing note", "note": note}))
 
-                # Handle missing created_by_account_id
-                if adracare_account_id is None:
-                    print(json.dumps({
-                        "warning": f"Missing created_by_account_id for note, using default_author_id: {default_author_id}"
-                    }))
-                    author_id = default_author_id
-                else:
-                    author_id = self.get_local_author_id(adracare_account_id)
-                    if not author_id:
+                    # Handle missing created_by_account_id
+                    if adracare_account_id is None:
                         print(json.dumps({
-                            "warning": f"No user found for adracare_account_id: {adracare_account_id}"
+                            "warning": f"Missing created_by_account_id for note, using default_author_id: {default_author_id}"
                         }))
-                        return inserted_records
+                        author_id = default_author_id
+                    else:
+                        author_id = self.get_local_author_id(adracare_account_id)
+                        if not author_id:
+                            print(json.dumps({
+                                "warning": f"No user found for adracare_account_id: {adracare_account_id}"
+                            }))
+                            return inserted_records
 
-                cursor.execute(sql, (
-                    note_text,
-                    local_patient_id,
-                    author_id,
-                    created_at,
-                    updated_at
-                ))
-                
-                # Get the ID of the inserted row
-                db_id = cursor.fetchone()[0]
-                inserted_records.append((created_at, db_id))
-                
-            self.conn.commit()
+                    # Format the SQL statement
+                    sql_statement = sql_template.format(
+                        notes=note_text.replace("'", "''"),  # Escape single quotes
+                        patient_id=local_patient_id,
+                        author_id=author_id,
+                        created_at=created_at,
+                        updated_at=updated_at
+                    )
+                    
+                    # Write the SQL statement to the file
+                    sql_file.write(sql_statement + "\n")
+                    
+                    # Append the record with a placeholder db_id (since no insertion is done)
+                    inserted_records.append((created_at, None))
+                    
         except Exception as e:
-            print(json.dumps({"error": f"Database error: {e}"}))
-            if self.conn:
-                self.conn.rollback()
+            print(json.dumps({"error": f"Error writing SQL statements: {e}"}))
         
         return inserted_records
    
