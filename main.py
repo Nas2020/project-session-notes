@@ -161,6 +161,7 @@ Adracare Encounter Notes Import Tool
 This script fetches encounter notes from the Adracare API for one or more patients
 and imports them into a local PostgreSQL database.
 """
+
 import json
 from datetime import datetime
 from config.settings import load_config
@@ -207,7 +208,8 @@ def process_patient(db, api_base_url, auth_token, patient_id, default_author_id)
             print(sql_gen_msg)
             patient_result["messages"].append(sql_gen_msg)
             
-            processed_records = db.generate_notes_sql(notes_data, patient_id, default_author_id, "output.sql")
+            # Always use append mode for individual patient processing to maintain all notes
+            processed_records = db.generate_notes_sql(notes_data, patient_id, default_author_id, "output.sql", "a")
             
             for created_at, _ in processed_records:
                 note_msg = f"Generated SQL for note created on {created_at}"
@@ -305,10 +307,14 @@ def main():
             
             # Process new notes
             if new_notes:
+                # Use write mode for first patient, append mode for subsequent patients
+                file_mode = "w" if patient_id == config["patient_ids"][0] else "a"
                 processed_records = db.generate_notes_sql(
                     new_notes, 
                     patient_id, 
-                    config["default_author_id"]
+                    config["default_author_id"],
+                    "output.sql",
+                    file_mode
                 )
                 
                 # Record processed notes
