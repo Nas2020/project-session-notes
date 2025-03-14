@@ -36,8 +36,7 @@ def fetch_alberta_providers(db_config=None):
         query = """
         SELECT id FROM users 
         WHERE ab_prac_id IS NOT NULL 
-        AND ab_prac_id != '' 
-        AND active = true
+        AND ab_prac_id != ''
         ORDER BY id
         """
         
