@@ -168,31 +168,53 @@ def extract_notes_data(encounter_notes_response):
     """
     notes_data = []
     
-    # Check if there's an error in the response
-    if "error" in encounter_notes_response:
-        return {"error": encounter_notes_response["error"], "notes": []}
+    # Check if the response is a dictionary
+    if not isinstance(encounter_notes_response, dict):
+        print(f"Warning: Unexpected response type: {type(encounter_notes_response)}")
+        return notes_data
     
-    # Process all notes in the response
-    try:
-        for item in encounter_notes_response.get("data", []):
-            # Get the note ID
+    # Get the data array, which should contain the notes
+    data_array = encounter_notes_response.get("data", [])
+    
+    # Check if data_array is actually a list
+    if not isinstance(data_array, list):
+        print(f"Warning: Expected 'data' to be a list, got: {type(data_array)}")
+        return notes_data
+    
+    # Process each item in the data array
+    for item in data_array:
+        try:
+            # Check if item is a dictionary
+            if not isinstance(item, dict):
+                print(f"Warning: Expected note item to be a dict, got: {type(item)}")
+                continue
+            
+            # Get the note ID with validation
             note_id = item.get("id", "")
             
+            # Get attributes with validation
             attributes = item.get("attributes", {})
+            if not isinstance(attributes, dict):
+                print(f"Warning: Expected 'attributes' to be a dict, got: {type(attributes)}")
+                attributes = {}
+            
+            # Create note data dictionary with safe gets
             note_data = {
-                "id": note_id,  # Add the note ID
+                "id": note_id,
                 "notes": attributes.get("notes", ""),
-                "created_at": attributes.get("created_at"),
-                "updated_at": attributes.get("updated_at"),
-                "patient_id": attributes.get("patient_id"),
-                "created_by_account_id": attributes.get("created_by_account_id")
+                "created_at": attributes.get("created_at", ""),
+                "updated_at": attributes.get("updated_at", ""),
+                "patient_id": attributes.get("patient_id", ""),
+                "created_by_account_id": attributes.get("created_by_account_id", "")
             }
+            
             notes_data.append(note_data)
-        
-        return {"success": True, "notes": notes_data}
-    except Exception as e:
-        return {"error": f"Error extracting notes data: {str(e)}", "notes": []}
-
+        except Exception as e:
+            print(f"Error processing note: {str(e)}")
+            # Continue to the next note instead of failing
+            continue
+    
+    return notes_data
 
 def process_all_patients(api_base_url, auth_token, patient_ids, max_retries=3, retry_delay=2):
     """
