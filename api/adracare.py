@@ -198,11 +198,11 @@ def extract_notes_data(encounter_notes_response):
                 print(f"Warning: Expected 'attributes' to be a dict, got: {type(attributes)}")
                 attributes = {}
             
-            # Create note data dictionary with safe gets
+            # Create note data dictionary with safe gets ; TO TEST TIME ERROR ISSUE modified creaetd_at to updated_at
             note_data = {
                 "id": note_id,
                 "notes": attributes.get("notes", ""),
-                "created_at": attributes.get("created_at", ""),
+                "created_at": attributes.get("updated_at", ""),
                 "updated_at": attributes.get("updated_at", ""),
                 "patient_id": attributes.get("patient_id", ""),
                 "created_by_account_id": attributes.get("created_by_account_id", "")
