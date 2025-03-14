@@ -470,7 +470,7 @@ class Database:
                         continue
                         
         except Exception as e:
-            print(json.dumps({"error": f"Error generating SQL statements: {e}"})
+            print(json.dumps({"error": f"Error generating SQL statements: {e}"}))
         
         print(f"Generated SQL for {len(processed_records)} records.")
         return processed_records
