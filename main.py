@@ -158,7 +158,8 @@ def main():
                     patient_id, 
                     config["default_author_id"],
                     "output.sql",
-                    file_mode
+                    file_mode,
+                    limit=1000 
                 )
                 
                 # Record processed notes
