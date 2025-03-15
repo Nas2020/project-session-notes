@@ -286,133 +286,6 @@ def process_patient(db, api_base_url, auth_token, patient_id, default_author_id)
         patient_result["error"] = str(e)
     
     return patient_result
-
-# def main():
-#     """Main execution function for the import script."""
-#     # Load configuration
-#     config = load_config()
-    
-#     # Initialize results structure - or load existing one if it exists
-#     results_file = "results.json"
-#     try:
-#         with open(results_file, "r") as infile:
-#             results = json.load(infile)
-#             results["last_run"] = datetime.now().isoformat()
-#     except (FileNotFoundError, json.JSONDecodeError):
-#         results = {
-#             "first_run": datetime.now().isoformat(),
-#             "last_run": datetime.now().isoformat(),
-#             "patients": {},
-#             "processed_notes": {}
-#         }
-    
-#     # Initialize database connection
-#     db = Database(config["db_config"])
-    
-#     # Global counter for total SQL statements
-#     total_sql_statements = 0
-#     global_limit = 1000  # Limit to 1000 SQL statements for testing
-    
-#     try:
-#         if not db.connect():
-#             raise Exception("Failed to connect to the database")
-        
-#         print("Fetching patient IDs from providers...")
-#         config = load_config(fetch_patient_ids=True, db=db)
-        
-#         print("Getting authentication token...")
-#         auth_token = get_auth_token(
-#             config["api_base_url"],
-#             config["username"],
-#             config["password"]
-#         )
-#         print("Authentication successful!")
-        
-#         # Process each patient until global limit is reached
-#         for patient_id in config["patient_ids"]:
-#             if total_sql_statements >= global_limit:
-#                 print(f"Reached global limit of {global_limit} SQL statements, stopping.")
-#                 break
-            
-#             print(f"\n=== Processing patient {patient_id} ===")
-#             if patient_id not in results["patients"]:
-#                 results["patients"][patient_id] = []
-            
-#             encounter_notes_response = get_encounter_notes(
-#                 config["api_base_url"], 
-#                 auth_token, 
-#                 patient_id
-#             )
-#             notes_data = extract_notes_data(encounter_notes_response)
-#             print(f"Found {len(notes_data)} encounter notes for {patient_id}.")
-            
-#             new_notes = []
-#             for note in notes_data:
-#                 note_id = note.get("id")
-#                 if note_id not in results["processed_notes"]:
-#                     new_notes.append(note)
-#                 else:
-#                     print(f"Note {note_id} already processed, skipping.")
-            
-#             print(f"Found {len(new_notes)} new notes to process.")
-            
-#             if new_notes:
-#                 file_mode = "w" if patient_id == config["patient_ids"][0] else "a"
-#                 # Pass remaining capacity to generate_notes_sql
-#                 remaining_capacity = global_limit - total_sql_statements
-#                 processed_records = db.generate_notes_sql(
-#                     new_notes, 
-#                     patient_id, 
-#                     config["default_author_id"],
-#                     "output.sql",
-#                     file_mode,
-#                     limit=remaining_capacity  # Limit based on remaining capacity
-#                 )
-                
-#                 # Update global counter
-#                 total_sql_statements += len(processed_records)
-                
-#                 for i, note in enumerate(new_notes):
-#                     if i < len(processed_records):  # Ensure we have records
-#                         note_id = note.get("id")
-#                         created_at, _ = processed_records[i]
-#                         results["processed_notes"][note_id] = {
-#                             "patient_id": patient_id,
-#                             "created_at": note.get("created_at"),
-#                             "processed_at": datetime.now().isoformat(),
-#                             "sql_generated": True
-#                         }
-#                         results["patients"][patient_id].append({
-#                             "note_id": note_id,
-#                             "created_at": note.get("created_at"),
-#                             "processed_at": datetime.now().isoformat(),
-#                             "sql_generated": True
-#                         })
-                
-#                 print(f"Successfully generated SQL for {len(processed_records)} notes. Total SQL statements: {total_sql_statements}")
-#             else:
-#                 print("No new notes to process.")
-    
-#     except Exception as e:
-#         print(f"Error: {e}")
-#         if "errors" not in results:
-#             results["errors"] = []
-#         results["errors"].append({
-#             "timestamp": datetime.now().isoformat(),
-#             "error": str(e)
-#         })
-    
-#     finally:
-#         db.close()
-    
-#     with open(results_file, "w") as outfile:
-#         json.dump(results, outfile, indent=2)
-    
-#     print(f"\nAll processing complete. Total SQL statements generated: {total_sql_statements}. See '{results_file}' for detailed logs.")
-
-# if __name__ == "__main__":
-#     main()
-
 #
 #
 # ********************TO REMOVE THE LIMIT 1000 *******************************************
@@ -479,7 +352,7 @@ def main():
             
             if new_notes:
                 file_mode = "w" if patient_id == config["patient_ids"][0] else "a"
-                # No limit passed to generate_notes_sql
+                
                 processed_records = db.generate_notes_sql(
                     new_notes, 
                     patient_id, 
