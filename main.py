@@ -526,13 +526,14 @@ async def main_async():
             # Wait for all tasks to complete with a maximum of 10 concurrent tasks
             # This helps prevent overloading the server with too many simultaneous requests
             patient_results = []
-            for batch in [tasks[i:i+10] for i in range(0, len(tasks), 10)]:
+            for i, batch in enumerate([tasks[j:j+10] for j in range(0, len(tasks), 10)]):
                 batch_results = await asyncio.gather(*batch)
                 patient_results.extend(batch_results)
                 # Add a small delay between batches to reduce server load
                 if len(tasks) > 10:
                     await asyncio.sleep(2)
-                    
+                
+                # Add this line to show progress
                 print(f"Processed batch {i+1}/{len(tasks)//10 + (1 if len(tasks) % 10 > 0 else 0)}")
             
             # Filter out failed patients
