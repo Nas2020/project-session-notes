@@ -243,10 +243,8 @@ def execute_sql_file_in_batches(file_path, batch_size=500, db_config=None):
     print(f"Starting execution of {file_path}")
     start_time = time.time()
     
-    # Function to split SQL properly respecting statements in functions, etc.
     def split_sql_statements(sql_content):
         statements = []
-        # Remove single-line comments
         sql_content = re.sub(r'--.*?$', '', sql_content, flags=re.MULTILINE)
         
         current_statement = ""
@@ -258,8 +256,7 @@ def execute_sql_file_in_batches(file_path, batch_size=500, db_config=None):
             char = sql_content[i]
             current_statement += char
             
-            # Handle string literals
-            if char in ("'", '"') and (i == 0 or sql_content[i-1] != '\\'):  # Check for unescaped quotes
+            if char in ("'", '"') and (i == 0 or sql_content[i-1] != '\\'):
                 if not in_string:
                     in_string = True
                     string_delimiter = char
@@ -267,20 +264,19 @@ def execute_sql_file_in_batches(file_path, batch_size=500, db_config=None):
                     in_string = False
                     string_delimiter = None
             
-            # Split on semicolon only if not in string and followed by whitespace/newline
             elif char == ';' and not in_string:
-                # Peek ahead to ensure it’s a statement end (whitespace, newline, or end of content)
                 if i + 1 >= len(sql_content) or sql_content[i+1].isspace():
                     stmt = current_statement.strip()
-                    if stmt:
+                    if stmt and "INSERT INTO patient_notes" in stmt:
                         statements.append(stmt)
+                    else:
+                        print(f"Invalid statement skipped: {stmt[:100]}...")
                     current_statement = ""
             
             i += 1
         
-        # Add any remaining statement
         last_stmt = current_statement.strip()
-        if last_stmt:
+        if last_stmt and "INSERT INTO patient_notes" in last_stmt:
             statements.append(last_stmt)
         
         return statements
@@ -344,6 +340,7 @@ def execute_sql_file_in_batches(file_path, batch_size=500, db_config=None):
                             batch_success += 1
                             successful_statements += 1
                         except Exception as e:
+                            conn.rollback()
                             # Log the error and the SQL statement to the error log file
                             error_log.write(f"Error in batch {batch_number}, statement {i + stmt_index + 1}:\n")
                             # Limit the statement length in the log to avoid huge log files

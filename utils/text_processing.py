@@ -87,43 +87,63 @@ import re
 from bs4 import BeautifulSoup
 
 def extract_text_from_html(html_content):
+    """
+    Extract plain text from HTML content:
+    - Discards all HTML tags and non-text elements (e.g., images, styling, bullet points).
+    - Normalizes all whitespace and newlines to a single space.
+    - Removes special characters that might cause SQL syntax errors.
+    - Escapes single quotes by replacing them with two single quotes.
+    
+    Args:
+        html_content (str or bytes): The HTML content to process.
+        
+    Returns:
+        str: The cleaned plain text, or an empty string if content is empty.
+    """
     if not html_content:
         return ""
     
-    # Replace <br> tags with newlines before parsing
-    html_content = re.sub(r'<br\s*/?>', '\n', html_content)
+    # Convert to string if bytes
+    if isinstance(html_content, bytes):
+        html_content = html_content.decode('utf-8', errors='ignore')
     
+    # Replace <br> tags with a space
+    html_content = re.sub(r'<br\s*/?>', ' ', html_content)
+    
+    # Parse HTML
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # First, get direct text nodes (text not in any block elements)
-    paragraphs = []
+    # Remove image tags (or any other tags not needed)
+    for img in soup.find_all('img'):
+        img.decompose()
     
-    # Extract text directly in the body before any block elements
+    # Extract text from direct string nodes and common text containers
+    paragraphs = []
+    # Process direct text nodes
     direct_text = ''
     for child in soup.children:
         if isinstance(child, str) and child.strip():
             direct_text += child.strip() + ' '
-    
     if direct_text.strip():
         paragraphs.append(direct_text.strip())
     
-    # Then extract text from block elements
+    # Process <p> and <div> elements
     for element in soup.find_all(['p', 'div']):
-        text = element.get_text(strip=True)
+        text = element.get_text(separator=" ", strip=True)
         if text:
             paragraphs.append(text)
     
-    # Join paragraphs with double newlines for better readability
-    text = "\n\n".join(paragraphs)
-    text = re.sub(r'\n+', ' ', text)  # Collapse newlines to spaces
-    text = re.sub(r' {2,}', ' ', text)
-    text = text.replace("'", "''")
-        
-    # Clean up excessive whitespace
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r' {2,}', ' ', text)
+    # Join all extracted text
+    text = ' '.join(paragraphs)
     
-    # Escape single quotes for SQL
+    # Normalize newlines and extra whitespace to a single space
+    text = re.sub(r'[\n\r]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove non-printable ASCII characters (keeps space to tilde)
+    text = re.sub(r'[^ -~]+', ' ', text)
+    
+    # Escape single quotes for SQL insertion
     text = text.replace("'", "''")
     
     return text.strip()
