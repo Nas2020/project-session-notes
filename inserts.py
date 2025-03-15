@@ -252,7 +252,7 @@ class SQLExecutor:
     def _extract_note_info(self, sql_comment):
         """Extract note_id and patient_id from SQL comment."""
         note_id_match = re.search(r'note_id:\s*([0-9a-f-]+)', sql_comment)
-        patient_id_match = re.search(r'patient_id:\s*(\d+)', sql_comment)
+        patient_id_match = re.search(r'patient_id:\s*([0-9a-f-]+)', sql_comment)
         
         note_id = note_id_match.group(1) if note_id_match else None
         patient_id = patient_id_match.group(1) if patient_id_match else None

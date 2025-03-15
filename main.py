@@ -1,10 +1,490 @@
-# #!/usr/bin/env python3
-# """
-# Adracare Encounter Notes Import Tool
+#!/usr/bin/env python3
+"""
+Adracare Encounter Notes Import Tool with Concurrent Processing
 
-# This script fetches encounter notes from the Adracare API for one or more patients
-# and imports them into a local PostgreSQL database.
-# """
+This script fetches encounter notes concurrently from the Adracare API for multiple patients
+and writes them to a PostgreSQL-compatible SQL file asynchronously.
+"""
+
+import json
+import asyncio
+import aiohttp
+import aiofiles
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from config.settings import load_config
+from api.adracare import extract_notes_data
+from utils.text_processing import extract_text_from_html
+from db.database import Database
+
+
+async def get_auth_token_async(api_base_url, username, password, session):
+    """
+    Get authentication token from Adracare API asynchronously.
+    
+    Args:
+        api_base_url: Base URL for the Adracare API
+        username: Adracare API username 
+        password: Adracare API password
+        session: aiohttp ClientSession
+        
+    Returns:
+        str: JWT authentication token
+        
+    Raises:
+        Exception: If authentication fails
+    """
+    url = f"{api_base_url}/account_token"
+    payload = {
+        "username": username,
+        "password": password
+    }
+    
+    async with session.post(url, json=payload) as response:
+        if response.status not in [200, 201]:
+            raise Exception(f"Authentication failed: {response.status} - {await response.text()}")
+        
+        data = await response.json()
+        return data["jwt"]
+
+
+async def get_encounter_notes_async(api_base_url, auth_token, patient_id, session, timeout=60, max_retries=3, retry_delay=5):
+    """
+    Get encounter notes for a specific patient from the Adracare API asynchronously.
+    
+    Args:
+        api_base_url: Base URL for the Adracare API
+        auth_token: JWT authentication token
+        patient_id: Adracare patient ID
+        session: aiohttp ClientSession
+        timeout: Timeout in seconds for the request (default: 60)
+        max_retries: Maximum number of retry attempts (default: 3)
+        retry_delay: Delay in seconds between retries (default: 5)
+        
+    Returns:
+        dict: JSON response containing encounter notes
+        
+    Raises:
+        Exception: If the API request fails
+    """
+    url = f"{api_base_url}/patients/{patient_id}/encounter_notes"
+    headers = {
+        "Authorization": f"Bearer {auth_token}"
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            async with session.get(url, headers=headers, timeout=timeout) as response:
+                if response.status != 200:
+                    error_message = f"Failed to get encounter notes: {response.status} - {await response.text()}"
+                    print(f"Attempt {attempt+1}/{max_retries} failed: {error_message}")
+                    
+                    # If this is not the last attempt, wait and try again
+                    if attempt < max_retries - 1:
+                        print(f"Waiting {retry_delay} seconds before retrying...")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    
+                    return {"error": error_message, "data": []}
+                
+                # Successfully got the response
+                return await response.json()
+                
+        except asyncio.TimeoutError:
+            print(f"Attempt {attempt+1}/{max_retries} timed out after {timeout} seconds")
+            
+            # If this is not the last attempt, wait and try again
+            if attempt < max_retries - 1:
+                print(f"Waiting {retry_delay} seconds before retrying...")
+                await asyncio.sleep(retry_delay)
+                continue
+            
+            return {"error": f"Request timed out after {max_retries} attempts", "data": []}
+            
+        except Exception as e:
+            error_msg = f"Exception occurred: {str(e)}"
+            print(f"Attempt {attempt+1}/{max_retries} failed: {error_msg}")
+            
+            # If this is not the last attempt, wait and try again
+            if attempt < max_retries - 1:
+                print(f"Waiting {retry_delay} seconds before retrying...")
+                await asyncio.sleep(retry_delay)
+                continue
+            
+            return {"error": error_msg, "data": []}
+
+
+async def process_patient_async(db, api_base_url, auth_token, patient_id, default_author_id, session):
+    """
+    Process encounter notes for a single patient asynchronously.
+    
+    Args:
+        db (Database): Database connection handler
+        api_base_url (str): Adracare API base URL
+        auth_token (str): Authentication token for Adracare API
+        patient_id (str): External patient ID from Adracare
+        default_author_id (int): Default author user ID
+        session: aiohttp ClientSession
+        
+    Returns:
+        dict: Results of patient processing
+    """
+    # Initialize result structure
+    patient_result = {
+        "patient_id": patient_id,
+        "messages": [],
+        "notes_found": 0,
+        "processed_notes": [],
+        "success": False
+    }
+    
+    msg = f"Fetching encounter notes for patient {patient_id}..."
+    print(msg)
+    patient_result["messages"].append(msg)
+    
+    try:
+        # Use the updated function with retry logic and longer timeout
+        encounter_notes_response = await get_encounter_notes_async(
+            api_base_url, auth_token, patient_id, session, 
+            timeout=120, max_retries=3, retry_delay=5
+        )
+        
+        if "error" in encounter_notes_response:
+            error_msg = f"Error fetching notes for patient {patient_id}: {encounter_notes_response['error']}"
+            print(error_msg)
+            patient_result["messages"].append(error_msg)
+            patient_result["error"] = encounter_notes_response["error"]
+            return patient_result
+        
+        notes_data = extract_notes_data(encounter_notes_response)
+        
+        msg = f"Found {len(notes_data)} encounter notes for {patient_id}."
+        print(msg)
+        patient_result["messages"].append(msg)
+        patient_result["notes_found"] = len(notes_data)
+        
+        if notes_data:
+            local_patient_id = db.get_local_patient_id(patient_id)
+            if not local_patient_id:
+                error_msg = f"Could not find local patient ID for Adracare patient ID: {patient_id}"
+                print(error_msg)
+                patient_result["messages"].append(error_msg)
+                patient_result["error"] = error_msg
+                return patient_result
+            
+            for note in notes_data:
+                note["local_patient_id"] = local_patient_id
+                note["external_patient_id"] = patient_id
+            
+            patient_result["notes_data"] = notes_data
+            patient_result["local_patient_id"] = local_patient_id
+            patient_result["external_patient_id"] = patient_id
+            patient_result["success"] = True
+        else:
+            no_notes_msg = "No notes to process."
+            print(no_notes_msg)
+            patient_result["messages"].append(no_notes_msg)
+            patient_result["success"] = True
+    
+    except Exception as e:
+        error_msg = f"Error processing patient {patient_id}: {str(e)}"
+        print(error_msg)
+        patient_result["messages"].append(error_msg)
+        patient_result["error"] = str(e)
+    
+    return patient_result
+
+
+async def write_sql_async(db, sql_file, notes_data, default_author_id, results_dict):
+    """
+    Generate and write SQL statements asynchronously.
+    
+    Args:
+        db (Database): Database connection handler
+        sql_file (str): Path to the SQL output file
+        notes_data (list): List of note data dictionaries
+        default_author_id (int): Default author user ID
+        results_dict (dict): Results dictionary to update
+        
+    Returns:
+        list: Processed records information
+    """
+    processed_records = []
+    
+    try:
+        # Generate SQL in a thread pool to avoid blocking the event loop
+        with ThreadPoolExecutor() as executor:
+            loop = asyncio.get_event_loop()
+            sql_statements = await loop.run_in_executor(
+                executor, 
+                lambda: [
+                    generate_note_sql(
+                        db,
+                        note, 
+                        note["local_patient_id"], 
+                        default_author_id
+                    ) for note in notes_data
+                ]
+            )
+        
+        # Write all SQL statements to the file asynchronously
+        async with aiofiles.open(sql_file, "a") as f:
+            for i, (note, sql_statement) in enumerate(zip(notes_data, sql_statements)):
+                if sql_statement:
+                    # Add comment with note_id and patient_id
+                    comment = f"-- note_id: {note.get('id', 'unknown')}, patient_id: {note['external_patient_id']}\n"
+                    await f.write(comment)
+                    await f.write(sql_statement + "\n\n")
+                    
+                    created_at = note.get("created_at")
+                    note_id = note.get("id")
+                    processed_records.append((created_at, note_id))
+                    
+                    # Update results dictionary
+                    if note_id:
+                        results_dict["processed_notes"][note_id] = {
+                            "patient_id": note.get("patient_id"),
+                            "local_patient_id": note["local_patient_id"],
+                            "external_patient_id": note["external_patient_id"],
+                            "created_at": created_at,
+                            "processed_at": datetime.now().isoformat(),
+                            "sql_generated": True
+                        }
+    
+    except Exception as e:
+        print(f"Error writing SQL: {e}")
+    
+    return processed_records
+
+
+def generate_note_sql(db, note, local_patient_id, default_author_id):
+    """
+    Generate SQL for a single note without executing it.
+    
+    Args:
+        db (Database): Database connection for ID lookups
+        note (dict): Note data
+        local_patient_id (int): Local patient ID
+        default_author_id (int): Default author user ID
+        
+    Returns:
+        str: SQL statement for the note, or None if there's an error
+    """
+    try:
+        # Extract text from HTML
+        note_text = extract_text_from_html(note.get("notes", ""))
+        created_at = note.get("created_at")
+        updated_at = note.get("updated_at")
+        
+        # Skip notes with missing created_at or updated_at
+        if created_at is None or updated_at is None:
+            print(f"Skipping note {note.get('id', 'unknown')} due to missing created_at or updated_at")
+            return None
+        
+        adracare_account_id = note.get("created_by_account_id")
+        
+        if adracare_account_id is None:
+            print(f"Missing created_by_account_id for note {note.get('id', 'unknown')}, using default_author_id: {default_author_id}")
+            author_id = default_author_id
+        else:
+            author_id = db.get_local_author_id(adracare_account_id)
+            if not author_id:
+                print(f"No user found for adracare_account_id: {adracare_account_id}, using default: {default_author_id}")
+                author_id = default_author_id
+        
+        sql_template = """
+        INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
+        VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC')
+        RETURNING id;
+        """
+        
+        params = (note_text, local_patient_id, author_id, created_at, updated_at)
+        sql_statement = db._format_properly_escaped_sql(sql_template, params)
+        
+        if not sql_statement.strip().endswith(';'):
+            sql_statement += ';'
+            
+        return sql_statement
+            
+    except Exception as e:
+        print(f"Error generating SQL for note {note.get('id', 'unknown')}: {e}")
+        return None
+
+
+async def main_async():
+    """Main asynchronous execution function for the import script."""
+    # Load basic configuration (will be updated later with patient IDs)
+    config = load_config()
+    
+    # Initialize results structure - or load existing one if it exists
+    results_file = "results.json"
+    try:
+        async with aiofiles.open(results_file, "r") as infile:
+            content = await infile.read()
+            results = json.loads(content)
+            results["last_run"] = datetime.now().isoformat()
+    except (FileNotFoundError, json.JSONDecodeError):
+        results = {
+            "first_run": datetime.now().isoformat(),
+            "last_run": datetime.now().isoformat(),
+            "patients": {},
+            "processed_notes": {}
+        }
+    
+    # Initialize database connection
+    db = Database(config["db_config"])
+    
+    try:
+        if not db.connect():
+            raise Exception("Failed to connect to the database")
+        
+        # Load configuration with dynamic patient ID fetching
+        print("Fetching patient IDs from providers...")
+        config = load_config(fetch_patient_ids=True, db=db)
+        
+        # Configure aiohttp session with proper timeout settings
+        timeout = aiohttp.ClientTimeout(total=120)  # 2 minutes total timeout
+
+        # Create aiohttp session for all HTTP requests
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            print("Getting authentication token...")
+            auth_token = await get_auth_token_async(
+                config["api_base_url"],
+                config["username"],
+                config["password"],
+                session
+            )
+            print("Authentication successful!")
+            
+            # Process all patients concurrently
+            print(f"Processing {len(config['patient_ids'])} patients concurrently...")
+            tasks = []
+            for patient_id in config["patient_ids"]:
+                # Initialize patient entry in results if needed
+                if patient_id not in results["patients"]:
+                    results["patients"][patient_id] = []
+                
+                # Create task for each patient
+                task = process_patient_async(
+                    db, 
+                    config["api_base_url"], 
+                    auth_token, 
+                    patient_id, 
+                    config["default_author_id"],
+                    session
+                )
+                tasks.append(task)
+            
+            # Wait for all tasks to complete with a maximum of 10 concurrent tasks
+            # This helps prevent overloading the server with too many simultaneous requests
+            patient_results = []
+            for i, batch in enumerate([tasks[j:j+10] for j in range(0, len(tasks), 10)]):
+                batch_results = await asyncio.gather(*batch)
+                patient_results.extend(batch_results)
+                # Add a small delay between batches to reduce server load
+                if len(tasks) > 10:
+                    await asyncio.sleep(2)
+                
+                # Add this line to show progress
+                print(f"Processed batch {i+1}/{(len(tasks)-1)//10 + 1}")
+            
+            # Filter out failed patients
+            successful_patients = [p for p in patient_results if p.get("success", False)]
+            failed_patients = [p for p in patient_results if not p.get("success", False)]
+            
+            print(f"Successfully fetched data for {len(successful_patients)} patients.")
+            print(f"Failed to fetch data for {len(failed_patients)} patients.")
+            
+            # Collect all notes to process
+            all_notes = []
+            for patient in successful_patients:
+                patient_notes = patient.get("notes_data", [])
+                if patient_notes:
+                    # Add only notes that haven't been processed yet
+                    new_notes = []
+                    for note in patient_notes:
+                        note_id = note.get("id")
+                        if note_id not in results["processed_notes"]:
+                            new_notes.append(note)
+                        else:
+                            print(f"Note {note_id} already processed, skipping.")
+                    
+                    all_notes.extend(new_notes)
+                    print(f"Added {len(new_notes)} new notes from patient {patient['patient_id']}.")
+            
+            # Clear the output file for the first write
+            if all_notes and config["patient_ids"]:
+                # Open in write mode to clear the file
+                async with aiofiles.open("output.sql", "w") as f:
+                    await f.write("-- Adracare Encounter Notes SQL Import\n")
+                    await f.write(f"-- Generated at: {datetime.now().isoformat()}\n\n")
+            
+            # Write all notes to SQL file asynchronously
+            if all_notes:
+                print(f"Writing {len(all_notes)} notes to SQL file...")
+                processed_records = await write_sql_async(
+                    db,
+                    "output.sql",
+                    all_notes,
+                    config["default_author_id"],
+                    results
+                )
+                
+                print(f"Successfully generated SQL for {len(processed_records)} notes.")
+            else:
+                print("No new notes to process.")
+                
+            # Update patient results in overall results
+            for patient in patient_results:
+                patient_id = patient["patient_id"]
+                # Don't overwrite the entire history, just append new results
+                patient_entry = {
+                    "run_time": datetime.now().isoformat(),
+                    "notes_found": patient.get("notes_found", 0),
+                    "success": patient.get("success", False)
+                }
+                if "error" in patient:
+                    patient_entry["error"] = patient["error"]
+                
+                results["patients"][patient_id].append(patient_entry)
+    
+    except Exception as e:
+        print(f"Error: {e}")
+        if "errors" not in results:
+            results["errors"] = []
+        results["errors"].append({
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        })
+    
+    finally:
+        db.close()
+    
+    # Write results to file
+    async with aiofiles.open(results_file, "w") as outfile:
+        await outfile.write(json.dumps(results, indent=2))
+    
+    print(f"\nAll processing complete. See '{results_file}' for detailed logs.")
+
+
+def main():
+    """Entry point for script, runs the async main function."""
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+# # #!/usr/bin/env python3
+# # """
+# # Adracare Encounter Notes Import Tool
+
+# # This script fetches encounter notes from the Adracare API for one or more patients
+# # and imports them into a local PostgreSQL database.
+# # """
 
 # import json
 # from datetime import datetime
@@ -624,469 +1104,469 @@
 #     main()
 
 
-import json
-import asyncio
-import aiohttp
-import aiofiles
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
-from config.settings import load_config
-from api.adracare import extract_notes_data
-from utils.text_processing import extract_text_from_html
-from db.database import Database
+# import json
+# import asyncio
+# import aiohttp
+# import aiofiles
+# from datetime import datetime
+# from concurrent.futures import ThreadPoolExecutor
+# from config.settings import load_config
+# from api.adracare import extract_notes_data
+# from utils.text_processing import extract_text_from_html
+# from db.database import Database
 
 
-async def get_auth_token_async(api_base_url, username, password, session):
-    """
-    Get authentication token from Adracare API asynchronously.
+# async def get_auth_token_async(api_base_url, username, password, session):
+#     """
+#     Get authentication token from Adracare API asynchronously.
     
-    Args:
-        api_base_url: Base URL for the Adracare API
-        username: Adracare API username 
-        password: Adracare API password
-        session: aiohttp ClientSession
+#     Args:
+#         api_base_url: Base URL for the Adracare API
+#         username: Adracare API username 
+#         password: Adracare API password
+#         session: aiohttp ClientSession
         
-    Returns:
-        str: JWT authentication token
+#     Returns:
+#         str: JWT authentication token
         
-    Raises:
-        Exception: If authentication fails
-    """
-    url = f"{api_base_url}/account_token"
-    payload = {
-        "username": username,
-        "password": password
-    }
+#     Raises:
+#         Exception: If authentication fails
+#     """
+#     url = f"{api_base_url}/account_token"
+#     payload = {
+#         "username": username,
+#         "password": password
+#     }
     
-    async with session.post(url, json=payload) as response:
-        if response.status not in [200, 201]:
-            raise Exception(f"Authentication failed: {response.status} - {await response.text()}")
+#     async with session.post(url, json=payload) as response:
+#         if response.status not in [200, 201]:
+#             raise Exception(f"Authentication failed: {response.status} - {await response.text()}")
         
-        data = await response.json()
-        return data["jwt"]
+#         data = await response.json()
+#         return data["jwt"]
 
 
-async def get_encounter_notes_async(api_base_url, auth_token, patient_id, session, timeout=60, max_retries=3, retry_delay=5):
-    """
-    Get encounter notes for a specific patient from the Adracare API asynchronously.
+# async def get_encounter_notes_async(api_base_url, auth_token, patient_id, session, timeout=60, max_retries=3, retry_delay=5):
+#     """
+#     Get encounter notes for a specific patient from the Adracare API asynchronously.
     
-    Args:
-        api_base_url: Base URL for the Adracare API
-        auth_token: JWT authentication token
-        patient_id: Adracare patient ID
-        session: aiohttp ClientSession
-        timeout: Timeout in seconds for the request (default: 60)
-        max_retries: Maximum number of retry attempts (default: 3)
-        retry_delay: Delay in seconds between retries (default: 5)
+#     Args:
+#         api_base_url: Base URL for the Adracare API
+#         auth_token: JWT authentication token
+#         patient_id: Adracare patient ID
+#         session: aiohttp ClientSession
+#         timeout: Timeout in seconds for the request (default: 60)
+#         max_retries: Maximum number of retry attempts (default: 3)
+#         retry_delay: Delay in seconds between retries (default: 5)
         
-    Returns:
-        dict: JSON response containing encounter notes
+#     Returns:
+#         dict: JSON response containing encounter notes
         
-    Raises:
-        Exception: If the API request fails
-    """
-    url = f"{api_base_url}/patients/{patient_id}/encounter_notes"
-    headers = {
-        "Authorization": f"Bearer {auth_token}"
-    }
+#     Raises:
+#         Exception: If the API request fails
+#     """
+#     url = f"{api_base_url}/patients/{patient_id}/encounter_notes"
+#     headers = {
+#         "Authorization": f"Bearer {auth_token}"
+#     }
     
-    for attempt in range(max_retries):
-        try:
-            async with session.get(url, headers=headers, timeout=timeout) as response:
-                if response.status != 200:
-                    error_message = f"Failed to get encounter notes: {response.status} - {await response.text()}"
-                    print(f"Attempt {attempt+1}/{max_retries} failed: {error_message}")
+#     for attempt in range(max_retries):
+#         try:
+#             async with session.get(url, headers=headers, timeout=timeout) as response:
+#                 if response.status != 200:
+#                     error_message = f"Failed to get encounter notes: {response.status} - {await response.text()}"
+#                     print(f"Attempt {attempt+1}/{max_retries} failed: {error_message}")
                     
-                    # If this is not the last attempt, wait and try again
-                    if attempt < max_retries - 1:
-                        print(f"Waiting {retry_delay} seconds before retrying...")
-                        await asyncio.sleep(retry_delay)
-                        continue
+#                     # If this is not the last attempt, wait and try again
+#                     if attempt < max_retries - 1:
+#                         print(f"Waiting {retry_delay} seconds before retrying...")
+#                         await asyncio.sleep(retry_delay)
+#                         continue
                     
-                    return {"error": error_message, "data": []}
+#                     return {"error": error_message, "data": []}
                 
-                # Successfully got the response
-                return await response.json()
+#                 # Successfully got the response
+#                 return await response.json()
                 
-        except asyncio.TimeoutError:
-            print(f"Attempt {attempt+1}/{max_retries} timed out after {timeout} seconds")
+#         except asyncio.TimeoutError:
+#             print(f"Attempt {attempt+1}/{max_retries} timed out after {timeout} seconds")
             
-            # If this is not the last attempt, wait and try again
-            if attempt < max_retries - 1:
-                print(f"Waiting {retry_delay} seconds before retrying...")
-                await asyncio.sleep(retry_delay)
-                continue
+#             # If this is not the last attempt, wait and try again
+#             if attempt < max_retries - 1:
+#                 print(f"Waiting {retry_delay} seconds before retrying...")
+#                 await asyncio.sleep(retry_delay)
+#                 continue
             
-            return {"error": f"Request timed out after {max_retries} attempts", "data": []}
+#             return {"error": f"Request timed out after {max_retries} attempts", "data": []}
             
-        except Exception as e:
-            error_msg = f"Exception occurred: {str(e)}"
-            print(f"Attempt {attempt+1}/{max_retries} failed: {error_msg}")
+#         except Exception as e:
+#             error_msg = f"Exception occurred: {str(e)}"
+#             print(f"Attempt {attempt+1}/{max_retries} failed: {error_msg}")
             
-            # If this is not the last attempt, wait and try again
-            if attempt < max_retries - 1:
-                print(f"Waiting {retry_delay} seconds before retrying...")
-                await asyncio.sleep(retry_delay)
-                continue
+#             # If this is not the last attempt, wait and try again
+#             if attempt < max_retries - 1:
+#                 print(f"Waiting {retry_delay} seconds before retrying...")
+#                 await asyncio.sleep(retry_delay)
+#                 continue
             
-            return {"error": error_msg, "data": []}
+#             return {"error": error_msg, "data": []}
 
 
-async def process_patient_async(db, api_base_url, auth_token, patient_id, default_author_id, session):
-    """
-    Process encounter notes for a single patient asynchronously.
+# async def process_patient_async(db, api_base_url, auth_token, patient_id, default_author_id, session):
+#     """
+#     Process encounter notes for a single patient asynchronously.
     
-    Args:
-        db (Database): Database connection handler
-        api_base_url (str): Adracare API base URL
-        auth_token (str): Authentication token for Adracare API
-        patient_id (str): External patient ID from Adracare
-        default_author_id (int): Default author user ID
-        session: aiohttp ClientSession
+#     Args:
+#         db (Database): Database connection handler
+#         api_base_url (str): Adracare API base URL
+#         auth_token (str): Authentication token for Adracare API
+#         patient_id (str): External patient ID from Adracare
+#         default_author_id (int): Default author user ID
+#         session: aiohttp ClientSession
         
-    Returns:
-        dict: Results of patient processing
-    """
-    # Initialize result structure
-    patient_result = {
-        "patient_id": patient_id,
-        "messages": [],
-        "notes_found": 0,
-        "processed_notes": [],
-        "success": False
-    }
+#     Returns:
+#         dict: Results of patient processing
+#     """
+#     # Initialize result structure
+#     patient_result = {
+#         "patient_id": patient_id,
+#         "messages": [],
+#         "notes_found": 0,
+#         "processed_notes": [],
+#         "success": False
+#     }
     
-    msg = f"Fetching encounter notes for patient {patient_id}..."
-    print(msg)
-    patient_result["messages"].append(msg)
+#     msg = f"Fetching encounter notes for patient {patient_id}..."
+#     print(msg)
+#     patient_result["messages"].append(msg)
     
-    try:
-        # Use the updated function with retry logic and longer timeout
-        encounter_notes_response = await get_encounter_notes_async(
-            api_base_url, auth_token, patient_id, session, 
-            timeout=120, max_retries=3, retry_delay=5
-        )
+#     try:
+#         # Use the updated function with retry logic and longer timeout
+#         encounter_notes_response = await get_encounter_notes_async(
+#             api_base_url, auth_token, patient_id, session, 
+#             timeout=120, max_retries=3, retry_delay=5
+#         )
         
-        if "error" in encounter_notes_response:
-            error_msg = f"Error fetching notes for patient {patient_id}: {encounter_notes_response['error']}"
-            print(error_msg)
-            patient_result["messages"].append(error_msg)
-            patient_result["error"] = encounter_notes_response["error"]
-            return patient_result
+#         if "error" in encounter_notes_response:
+#             error_msg = f"Error fetching notes for patient {patient_id}: {encounter_notes_response['error']}"
+#             print(error_msg)
+#             patient_result["messages"].append(error_msg)
+#             patient_result["error"] = encounter_notes_response["error"]
+#             return patient_result
         
-        notes_data = extract_notes_data(encounter_notes_response)
+#         notes_data = extract_notes_data(encounter_notes_response)
         
-        msg = f"Found {len(notes_data)} encounter notes for {patient_id}."
-        print(msg)
-        patient_result["messages"].append(msg)
-        patient_result["notes_found"] = len(notes_data)
+#         msg = f"Found {len(notes_data)} encounter notes for {patient_id}."
+#         print(msg)
+#         patient_result["messages"].append(msg)
+#         patient_result["notes_found"] = len(notes_data)
         
-        if notes_data:
-            local_patient_id = db.get_local_patient_id(patient_id)
-            if not local_patient_id:
-                error_msg = f"Could not find local patient ID for Adracare patient ID: {patient_id}"
-                print(error_msg)
-                patient_result["messages"].append(error_msg)
-                patient_result["error"] = error_msg
-                return patient_result
+#         if notes_data:
+#             local_patient_id = db.get_local_patient_id(patient_id)
+#             if not local_patient_id:
+#                 error_msg = f"Could not find local patient ID for Adracare patient ID: {patient_id}"
+#                 print(error_msg)
+#                 patient_result["messages"].append(error_msg)
+#                 patient_result["error"] = error_msg
+#                 return patient_result
             
-            for note in notes_data:
-                note["local_patient_id"] = local_patient_id
-                note["external_patient_id"] = patient_id
+#             for note in notes_data:
+#                 note["local_patient_id"] = local_patient_id
+#                 note["external_patient_id"] = patient_id
             
-            patient_result["notes_data"] = notes_data
-            patient_result["local_patient_id"] = local_patient_id
-            patient_result["external_patient_id"] = patient_id
-            patient_result["success"] = True
-        else:
-            no_notes_msg = "No notes to process."
-            print(no_notes_msg)
-            patient_result["messages"].append(no_notes_msg)
-            patient_result["success"] = True
+#             patient_result["notes_data"] = notes_data
+#             patient_result["local_patient_id"] = local_patient_id
+#             patient_result["external_patient_id"] = patient_id
+#             patient_result["success"] = True
+#         else:
+#             no_notes_msg = "No notes to process."
+#             print(no_notes_msg)
+#             patient_result["messages"].append(no_notes_msg)
+#             patient_result["success"] = True
     
-    except Exception as e:
-        error_msg = f"Error processing patient {patient_id}: {str(e)}"
-        print(error_msg)
-        patient_result["messages"].append(error_msg)
-        patient_result["error"] = str(e)
+#     except Exception as e:
+#         error_msg = f"Error processing patient {patient_id}: {str(e)}"
+#         print(error_msg)
+#         patient_result["messages"].append(error_msg)
+#         patient_result["error"] = str(e)
     
-    return patient_result
+#     return patient_result
 
 
-def generate_note_sql(db, note, local_patient_id, default_author_id):
-    """
-    Generate SQL for a single note without executing it.
+# def generate_note_sql(db, note, local_patient_id, default_author_id):
+#     """
+#     Generate SQL for a single note without executing it.
     
-    Args:
-        db (Database): Database connection for ID lookups
-        note (dict): Note data
-        local_patient_id (int): Local patient ID
-        default_author_id (int): Default author user ID
+#     Args:
+#         db (Database): Database connection for ID lookups
+#         note (dict): Note data
+#         local_patient_id (int): Local patient ID
+#         default_author_id (int): Default author user ID
         
-    Returns:
-        str: SQL statement for the note, or None if there's an error
-    """
-    try:
-        # Extract text from HTML
-        note_text = extract_text_from_html(note.get("notes", ""))
-        created_at = note.get("created_at")
-        updated_at = note.get("updated_at")
+#     Returns:
+#         str: SQL statement for the note, or None if there's an error
+#     """
+#     try:
+#         # Extract text from HTML
+#         note_text = extract_text_from_html(note.get("notes", ""))
+#         created_at = note.get("created_at")
+#         updated_at = note.get("updated_at")
         
-        # Skip notes with missing created_at or updated_at
-        if created_at is None or updated_at is None:
-            print(f"Skipping note {note.get('id', 'unknown')} due to missing created_at or updated_at")
-            return None
+#         # Skip notes with missing created_at or updated_at
+#         if created_at is None or updated_at is None:
+#             print(f"Skipping note {note.get('id', 'unknown')} due to missing created_at or updated_at")
+#             return None
         
-        adracare_account_id = note.get("created_by_account_id")
+#         adracare_account_id = note.get("created_by_account_id")
         
-        if adracare_account_id is None:
-            print(f"Missing created_by_account_id for note {note.get('id', 'unknown')}, using default_author_id: {default_author_id}")
-            author_id = default_author_id
-        else:
-            author_id = db.get_local_author_id(adracare_account_id)
-            if not author_id:
-                print(f"No user found for adracare_account_id: {adracare_account_id}, using default: {default_author_id}")
-                author_id = default_author_id
+#         if adracare_account_id is None:
+#             print(f"Missing created_by_account_id for note {note.get('id', 'unknown')}, using default_author_id: {default_author_id}")
+#             author_id = default_author_id
+#         else:
+#             author_id = db.get_local_author_id(adracare_account_id)
+#             if not author_id:
+#                 print(f"No user found for adracare_account_id: {adracare_account_id}, using default: {default_author_id}")
+#                 author_id = default_author_id
         
-        sql_template = """
-        INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
-        VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC')
-        RETURNING id;
-        """
+#         sql_template = """
+#         INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
+#         VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC')
+#         RETURNING id;
+#         """
         
-        params = (note_text, local_patient_id, author_id, created_at, updated_at)
-        sql_statement = db._format_properly_escaped_sql(sql_template, params)
+#         params = (note_text, local_patient_id, author_id, created_at, updated_at)
+#         sql_statement = db._format_properly_escaped_sql(sql_template, params)
         
-        if not sql_statement.strip().endswith(';'):
-            sql_statement += ';'
+#         if not sql_statement.strip().endswith(';'):
+#             sql_statement += ';'
             
-        return sql_statement
+#         return sql_statement
             
-    except Exception as e:
-        print(f"Error generating SQL for note {note.get('id', 'unknown')}: {e}")
-        return None
+#     except Exception as e:
+#         print(f"Error generating SQL for note {note.get('id', 'unknown')}: {e}")
+#         return None
 
 
-async def write_sql_async(db, sql_file, notes_data, default_author_id, results_dict):
-    """
-    Generate and write SQL statements asynchronously.
+# async def write_sql_async(db, sql_file, notes_data, default_author_id, results_dict):
+#     """
+#     Generate and write SQL statements asynchronously.
     
-    Args:
-        db (Database): Database connection handler
-        sql_file (str): Path to the SQL output file
-        notes_data (list): List of note data dictionaries
-        default_author_id (int): Default author user ID
-        results_dict (dict): Results dictionary to update
+#     Args:
+#         db (Database): Database connection handler
+#         sql_file (str): Path to the SQL output file
+#         notes_data (list): List of note data dictionaries
+#         default_author_id (int): Default author user ID
+#         results_dict (dict): Results dictionary to update
         
-    Returns:
-        list: Processed records information
-    """
-    processed_records = []
+#     Returns:
+#         list: Processed records information
+#     """
+#     processed_records = []
     
-    try:
-        # Generate SQL in a thread pool to avoid blocking the event loop
-        with ThreadPoolExecutor() as executor:
-            loop = asyncio.get_event_loop()
-            sql_statements = await loop.run_in_executor(
-                executor, 
-                lambda: [
-                    generate_note_sql(
-                        db,
-                        note, 
-                        note["local_patient_id"], 
-                        default_author_id
-                    ) for note in notes_data
-                ]
-            )
+#     try:
+#         # Generate SQL in a thread pool to avoid blocking the event loop
+#         with ThreadPoolExecutor() as executor:
+#             loop = asyncio.get_event_loop()
+#             sql_statements = await loop.run_in_executor(
+#                 executor, 
+#                 lambda: [
+#                     generate_note_sql(
+#                         db,
+#                         note, 
+#                         note["local_patient_id"], 
+#                         default_author_id
+#                     ) for note in notes_data
+#                 ]
+#             )
         
-        # Write all SQL statements to the file asynchronously
-        async with aiofiles.open(sql_file, "a") as f:
-            for i, (note, sql_statement) in enumerate(zip(notes_data, sql_statements)):
-                if sql_statement:
-                    # Add comment with note_id and patient_id
-                    comment = f"-- note_id: {note.get('id', 'unknown')}, patient_id: {note['external_patient_id']}\n"
-                    await f.write(comment)
-                    await f.write(sql_statement + "\n\n")
+#         # Write all SQL statements to the file asynchronously
+#         async with aiofiles.open(sql_file, "a") as f:
+#             for i, (note, sql_statement) in enumerate(zip(notes_data, sql_statements)):
+#                 if sql_statement:
+#                     # Add comment with note_id and patient_id
+#                     comment = f"-- note_id: {note.get('id', 'unknown')}, patient_id: {note['external_patient_id']}\n"
+#                     await f.write(comment)
+#                     await f.write(sql_statement + "\n\n")
                     
-                    created_at = note.get("created_at")
-                    note_id = note.get("id")
-                    processed_records.append((created_at, note_id))
+#                     created_at = note.get("created_at")
+#                     note_id = note.get("id")
+#                     processed_records.append((created_at, note_id))
                     
-                    # Update results dictionary
-                    if note_id:
-                        results_dict["processed_notes"][note_id] = {
-                            "patient_id": note.get("patient_id"),
-                            "local_patient_id": note["local_patient_id"],
-                            "external_patient_id": note["external_patient_id"],
-                            "created_at": created_at,
-                            "processed_at": datetime.now().isoformat(),
-                            "sql_generated": True
-                        }
+#                     # Update results dictionary
+#                     if note_id:
+#                         results_dict["processed_notes"][note_id] = {
+#                             "patient_id": note.get("patient_id"),
+#                             "local_patient_id": note["local_patient_id"],
+#                             "external_patient_id": note["external_patient_id"],
+#                             "created_at": created_at,
+#                             "processed_at": datetime.now().isoformat(),
+#                             "sql_generated": True
+#                         }
     
-    except Exception as e:
-        print(f"Error writing SQL: {e}")
+#     except Exception as e:
+#         print(f"Error writing SQL: {e}")
     
-    return processed_records
+#     return processed_records
 
 
-async def main_async():
-    """Main asynchronous execution function for the import script."""
-    # Load configuration
-    config = load_config()
+# async def main_async():
+#     """Main asynchronous execution function for the import script."""
+#     # Load configuration
+#     config = load_config()
     
-    # Initialize results structure - or load existing one if it exists
-    results_file = "results.json"
-    try:
-        async with aiofiles.open(results_file, "r") as infile:
-            content = await infile.read()
-            results = json.loads(content)
-            results["last_run"] = datetime.now().isoformat()
-    except (FileNotFoundError, json.JSONDecodeError):
-        results = {
-            "first_run": datetime.now().isoformat(),
-            "last_run": datetime.now().isoformat(),
-            "patients": {},
-            "processed_notes": {}
-        }
+#     # Initialize results structure - or load existing one if it exists
+#     results_file = "results.json"
+#     try:
+#         async with aiofiles.open(results_file, "r") as infile:
+#             content = await infile.read()
+#             results = json.loads(content)
+#             results["last_run"] = datetime.now().isoformat()
+#     except (FileNotFoundError, json.JSONDecodeError):
+#         results = {
+#             "first_run": datetime.now().isoformat(),
+#             "last_run": datetime.now().isoformat(),
+#             "patients": {},
+#             "processed_notes": {}
+#         }
     
-    # Initialize database connection
-    db = Database(config["db_config"])
+#     # Initialize database connection
+#     db = Database(config["db_config"])
     
-    try:
-        if not db.connect():
-            raise Exception("Failed to connect to the database")
+#     try:
+#         if not db.connect():
+#             raise Exception("Failed to connect to the database")
         
-        print("Using patient IDs from config...")
+#         print("Using patient IDs from config...")
         
-        # Configure aiohttp session with proper timeout settings
-        timeout = aiohttp.ClientTimeout(total=120)  # 2 minutes total timeout
+#         # Configure aiohttp session with proper timeout settings
+#         timeout = aiohttp.ClientTimeout(total=120)  # 2 minutes total timeout
 
-        # Create aiohttp session for all HTTP requests
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            print("Getting authentication token...")
-            auth_token = await get_auth_token_async(
-                config["api_base_url"],
-                config["username"],
-                config["password"],
-                session
-            )
-            print("Authentication successful!")
+#         # Create aiohttp session for all HTTP requests
+#         async with aiohttp.ClientSession(timeout=timeout) as session:
+#             print("Getting authentication token...")
+#             auth_token = await get_auth_token_async(
+#                 config["api_base_url"],
+#                 config["username"],
+#                 config["password"],
+#                 session
+#             )
+#             print("Authentication successful!")
             
-            # Process all patients concurrently
-            print(f"Processing {len(config['patient_ids'])} patients concurrently...")
-            tasks = []
-            for patient_id in config["patient_ids"]:
-                # Initialize patient entry in results if needed
-                if patient_id not in results["patients"]:
-                    results["patients"][patient_id] = []
+#             # Process all patients concurrently
+#             print(f"Processing {len(config['patient_ids'])} patients concurrently...")
+#             tasks = []
+#             for patient_id in config["patient_ids"]:
+#                 # Initialize patient entry in results if needed
+#                 if patient_id not in results["patients"]:
+#                     results["patients"][patient_id] = []
                 
-                # Create task for each patient
-                task = process_patient_async(
-                    db, 
-                    config["api_base_url"], 
-                    auth_token, 
-                    patient_id, 
-                    config["default_author_id"],
-                    session
-                )
-                tasks.append(task)
+#                 # Create task for each patient
+#                 task = process_patient_async(
+#                     db, 
+#                     config["api_base_url"], 
+#                     auth_token, 
+#                     patient_id, 
+#                     config["default_author_id"],
+#                     session
+#                 )
+#                 tasks.append(task)
             
-            # Wait for all tasks to complete with a maximum of 10 concurrent tasks
-            # This helps prevent overloading the server with too many simultaneous requests
-            patient_results = []
-            for i, batch in enumerate([tasks[j:j+10] for j in range(0, len(tasks), 10)]):
-                batch_results = await asyncio.gather(*batch)
-                patient_results.extend(batch_results)
-                # Add a small delay between batches to reduce server load
-                if len(tasks) > 10:
-                    await asyncio.sleep(2)
+#             # Wait for all tasks to complete with a maximum of 10 concurrent tasks
+#             # This helps prevent overloading the server with too many simultaneous requests
+#             patient_results = []
+#             for i, batch in enumerate([tasks[j:j+10] for j in range(0, len(tasks), 10)]):
+#                 batch_results = await asyncio.gather(*batch)
+#                 patient_results.extend(batch_results)
+#                 # Add a small delay between batches to reduce server load
+#                 if len(tasks) > 10:
+#                     await asyncio.sleep(2)
                 
-                # Add this line to show progress
-                print(f"Processed batch {i+1}/{len(tasks)//10 + (1 if len(tasks) % 10 > 0 else 0)}")
+#                 # Add this line to show progress
+#                 print(f"Processed batch {i+1}/{len(tasks)//10 + (1 if len(tasks) % 10 > 0 else 0)}")
             
-            # Filter out failed patients
-            successful_patients = [p for p in patient_results if p.get("success", False)]
-            failed_patients = [p for p in patient_results if not p.get("success", False)]
+#             # Filter out failed patients
+#             successful_patients = [p for p in patient_results if p.get("success", False)]
+#             failed_patients = [p for p in patient_results if not p.get("success", False)]
             
-            print(f"Successfully fetched data for {len(successful_patients)} patients.")
-            print(f"Failed to fetch data for {len(failed_patients)} patients.")
+#             print(f"Successfully fetched data for {len(successful_patients)} patients.")
+#             print(f"Failed to fetch data for {len(failed_patients)} patients.")
             
-            # Collect all notes to process
-            all_notes = []
-            for patient in successful_patients:
-                patient_notes = patient.get("notes_data", [])
-                if patient_notes:
-                    # Add only notes that haven't been processed yet
-                    new_notes = []
-                    for note in patient_notes:
-                        note_id = note.get("id")
-                        if note_id not in results["processed_notes"]:
-                            new_notes.append(note)
-                        else:
-                            print(f"Note {note_id} already processed, skipping.")
+#             # Collect all notes to process
+#             all_notes = []
+#             for patient in successful_patients:
+#                 patient_notes = patient.get("notes_data", [])
+#                 if patient_notes:
+#                     # Add only notes that haven't been processed yet
+#                     new_notes = []
+#                     for note in patient_notes:
+#                         note_id = note.get("id")
+#                         if note_id not in results["processed_notes"]:
+#                             new_notes.append(note)
+#                         else:
+#                             print(f"Note {note_id} already processed, skipping.")
                     
-                    all_notes.extend(new_notes)
-                    print(f"Added {len(new_notes)} new notes from patient {patient['patient_id']}.")
+#                     all_notes.extend(new_notes)
+#                     print(f"Added {len(new_notes)} new notes from patient {patient['patient_id']}.")
             
-            # Clear the output file for the first write
-            if all_notes and config["patient_ids"]:
-                # Open in write mode to clear the file
-                async with aiofiles.open("output.sql", "w") as f:
-                    await f.write("-- Adracare Encounter Notes SQL Import\n")
-                    await f.write(f"-- Generated at: {datetime.now().isoformat()}\n\n")
+#             # Clear the output file for the first write
+#             if all_notes and config["patient_ids"]:
+#                 # Open in write mode to clear the file
+#                 async with aiofiles.open("output.sql", "w") as f:
+#                     await f.write("-- Adracare Encounter Notes SQL Import\n")
+#                     await f.write(f"-- Generated at: {datetime.now().isoformat()}\n\n")
             
-            # Write all notes to SQL file asynchronously
-            if all_notes:
-                print(f"Writing {len(all_notes)} notes to SQL file...")
-                processed_records = await write_sql_async(
-                    db,
-                    "output.sql",
-                    all_notes,
-                    config["default_author_id"],
-                    results
-                )
+#             # Write all notes to SQL file asynchronously
+#             if all_notes:
+#                 print(f"Writing {len(all_notes)} notes to SQL file...")
+#                 processed_records = await write_sql_async(
+#                     db,
+#                     "output.sql",
+#                     all_notes,
+#                     config["default_author_id"],
+#                     results
+#                 )
                 
-                print(f"Successfully generated SQL for {len(processed_records)} notes.")
-            else:
-                print("No new notes to process.")
+#                 print(f"Successfully generated SQL for {len(processed_records)} notes.")
+#             else:
+#                 print("No new notes to process.")
                 
-            # Update patient results in overall results
-            for patient in patient_results:
-                patient_id = patient["patient_id"]
-                # Don't overwrite the entire history, just append new results
-                patient_entry = {
-                    "run_time": datetime.now().isoformat(),
-                    "notes_found": patient.get("notes_found", 0),
-                    "success": patient.get("success", False)
-                }
-                if "error" in patient:
-                    patient_entry["error"] = patient["error"]
+#             # Update patient results in overall results
+#             for patient in patient_results:
+#                 patient_id = patient["patient_id"]
+#                 # Don't overwrite the entire history, just append new results
+#                 patient_entry = {
+#                     "run_time": datetime.now().isoformat(),
+#                     "notes_found": patient.get("notes_found", 0),
+#                     "success": patient.get("success", False)
+#                 }
+#                 if "error" in patient:
+#                     patient_entry["error"] = patient["error"]
                 
-                results["patients"][patient_id].append(patient_entry)
+#                 results["patients"][patient_id].append(patient_entry)
     
-    except Exception as e:
-        print(f"Error: {e}")
-        if "errors" not in results:
-            results["errors"] = []
-        results["errors"].append({
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e)
-        })
+#     except Exception as e:
+#         print(f"Error: {e}")
+#         if "errors" not in results:
+#             results["errors"] = []
+#         results["errors"].append({
+#             "timestamp": datetime.now().isoformat(),
+#             "error": str(e)
+#         })
     
-    finally:
-        db.close()
+#     finally:
+#         db.close()
     
-    # Write results to file
-    async with aiofiles.open(results_file, "w") as outfile:
-        await outfile.write(json.dumps(results, indent=2))
+#     # Write results to file
+#     async with aiofiles.open(results_file, "w") as outfile:
+#         await outfile.write(json.dumps(results, indent=2))
     
-    print(f"\nAll processing complete. See '{results_file}' for detailed logs.")
+#     print(f"\nAll processing complete. See '{results_file}' for detailed logs.")
 
 
-def main():
-    """Entry point for script, runs the async main function."""
-    asyncio.run(main_async())
+# def main():
+#     """Entry point for script, runs the async main function."""
+#     asyncio.run(main_async())
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

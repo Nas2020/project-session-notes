@@ -441,7 +441,7 @@
 #             print(json.dumps({"error": f"Error fetching external ID for patient {patient_id}: {e}"}))
 #             return None
 
-"""
+""" 
 Database connection and operations handler for ID mapping.
 """
 import psycopg2
@@ -558,3 +558,47 @@ class Database:
         finally:
             if not self.conn and 'temp_conn' in locals():
                 temp_conn.close()
+    
+    def get_patient_ids_by_provider(self, provider_id):
+        """
+        Fetch unique patient IDs associated with a provider from the appointments table.
+        
+        Args:
+            provider_id (str): Provider's user ID
+            
+        Returns:
+            list: Sorted list of unique patient IDs
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT patient_id FROM appointments WHERE user_id = %s ORDER BY patient_id ASC",
+                (provider_id,)
+            )
+            result = cursor.fetchall()
+            return [row[0] for row in result] if result else []
+        except Exception as e:
+            print(f"Error fetching patient IDs for provider {provider_id}: {e}")
+            return []
+
+    def get_external_id_by_patient_id(self, patient_id):
+        """
+        Get the external ID for a patient.
+        
+        Args:
+            patient_id (int): Local patient ID
+            
+        Returns:
+            str or None: External patient ID if found, None otherwise
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT external_id FROM patients WHERE id = %s",
+                (patient_id,)
+            )
+            result = cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            print(f"Error fetching external ID for patient {patient_id}: {e}")
+            return None
