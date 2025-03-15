@@ -115,7 +115,10 @@ def extract_text_from_html(html_content):
     
     # Join paragraphs with double newlines for better readability
     text = "\n\n".join(paragraphs)
-    
+    text = re.sub(r'\n+', ' ', text)  # Collapse newlines to spaces
+    text = re.sub(r' {2,}', ' ', text)
+    text = text.replace("'", "''")
+        
     # Clean up excessive whitespace
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' {2,}', ' ', text)

@@ -251,9 +251,7 @@ def execute_sql_file_in_batches(file_path, batch_size=500, db_config=None):
         
         current_statement = ""
         in_string = False
-        in_identifier = False
         string_delimiter = None
-        depth = 0  # Track nested structures (e.g., parentheses)
         
         i = 0
         while i < len(sql_content):
@@ -261,32 +259,22 @@ def execute_sql_file_in_batches(file_path, batch_size=500, db_config=None):
             current_statement += char
             
             # Handle string literals
-            if char == "'" and not in_identifier:
+            if char in ("'", '"') and (i == 0 or sql_content[i-1] != '\\'):  # Check for unescaped quotes
                 if not in_string:
                     in_string = True
-                    string_delimiter = "'"
-                elif string_delimiter == "'":
+                    string_delimiter = char
+                elif string_delimiter == char:
                     in_string = False
                     string_delimiter = None
             
-            elif char == '"' and not in_string:
-                if not in_identifier:
-                    in_identifier = True
-                else:
-                    in_identifier = False
-            
-            # Track nesting for complex statements
-            elif char == '(' and not in_string and not in_identifier:
-                depth += 1
-            elif char == ')' and not in_string and not in_identifier:
-                depth -= 1
-            
-            # Split on semicolon only if not in string, identifier, or nested structure
-            elif char == ';' and not in_string and not in_identifier and depth == 0:
-                stmt = current_statement.strip()
-                if stmt:
-                    statements.append(stmt)
-                current_statement = ""
+            # Split on semicolon only if not in string and followed by whitespace/newline
+            elif char == ';' and not in_string:
+                # Peek ahead to ensure it’s a statement end (whitespace, newline, or end of content)
+                if i + 1 >= len(sql_content) or sql_content[i+1].isspace():
+                    stmt = current_statement.strip()
+                    if stmt:
+                        statements.append(stmt)
+                    current_statement = ""
             
             i += 1
         
