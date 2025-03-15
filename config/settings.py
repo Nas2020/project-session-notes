@@ -25,7 +25,7 @@ def load_config(fetch_patient_ids=False, db=None):
         "api_base_url": os.getenv("ADRA_BASE_URL"),
         "username": os.getenv("ADRA_USERNAME"),
         "password": os.getenv("ADRA_PASSWORD"),
-        "default_author_id": int(os.getenv("DEFAULT_AUTHOR_ID")),
+        "default_author_id": int(os.getenv("DEFAULT_AUTHOR_ID", "0")),
         "db_config": {
             "host": os.getenv("DB_HOST", "localhost"),
             "port": int(os.getenv("DB_PORT", 5432)),
