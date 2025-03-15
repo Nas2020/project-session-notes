@@ -117,33 +117,20 @@ def extract_text_from_html(html_content):
     for img in soup.find_all('img'):
         img.decompose()
     
-    # Extract text from direct string nodes and common text containers
-    paragraphs = []
-    # Process direct text nodes
-    direct_text = ''
-    for child in soup.children:
-        if isinstance(child, str) and child.strip():
-            direct_text += child.strip() + ' '
-    if direct_text.strip():
-        paragraphs.append(direct_text.strip())
-    
-    # Process <p> and <div> elements
-    for element in soup.find_all(['p', 'div']):
-        text = element.get_text(separator=" ", strip=True)
-        if text:
-            paragraphs.append(text)
-    
-    # Join all extracted text
-    text = ' '.join(paragraphs)
+    # Extract text from HTML
+    text = soup.get_text(separator=" ", strip=True)
     
     # Normalize newlines and extra whitespace to a single space
     text = re.sub(r'[\n\r]+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     
     # Remove non-printable ASCII characters (keeps space to tilde)
-    text = re.sub(r'[^ -~]+', ' ', text)
+    text = re.sub(r'[^\x20-\x7E]+', ' ', text)
     
-    # Escape single quotes for SQL insertion
+    # Double-escape single quotes for SQL insertion (ensuring they're properly escaped)
     text = text.replace("'", "''")
+    
+    # Remove any characters that could cause SQL injection or parsing issues
+    text = re.sub(r'[\\";`]', '', text)
     
     return text.strip()

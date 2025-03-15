@@ -543,18 +543,51 @@ class Database:
             str: Properly formatted SQL statement
         """
         try:
+            # First make sure all string params have their quotes properly escaped
+            safe_params = []
+            for p in params:
+                if isinstance(p, str):
+                    # Double-check single quotes are properly escaped
+                    safe_params.append(p.replace("'", "''"))
+                else:
+                    safe_params.append(p)
+            
             # Use existing connection if available, otherwise create a temporary one
             if self.conn:
                 cursor = self.conn.cursor()
             else:
                 temp_conn = psycopg2.connect(**self.db_config)
                 cursor = temp_conn.cursor()
-            formatted_sql = cursor.mogrify(template, params).decode('utf-8')
+            
+            formatted_sql = cursor.mogrify(template, tuple(safe_params)).decode('utf-8')
             return formatted_sql
         except Exception as e:
             print(f"Error formatting SQL: {e}")
             # Fallback with manual escaping
-            return template.replace("%s", "'{}'").format(*[str(p).replace("'", "''") for p in params])
+            safe_params = []
+            for p in params:
+                if p is None:
+                    safe_params.append('NULL')
+                elif isinstance(p, str):
+                    # Make sure quotes are properly escaped in the fallback too
+                    safe_params.append(str(p).replace("'", "''"))
+                else:
+                    safe_params.append(str(p))
+            
+            # Replace %s with '{}'
+            placeholder_template = template.replace("%s", "{}")
+            
+            # Format with proper SQL quoting
+            formatted_parts = []
+            for p in safe_params:
+                if p == 'NULL':
+                    formatted_parts.append(p)
+                elif isinstance(p, (int, float)):
+                    formatted_parts.append(str(p))
+                else:
+                    formatted_parts.append(f"'{p}'")
+            
+            return placeholder_template.format(*formatted_parts)
         finally:
             if not self.conn and 'temp_conn' in locals():
                 temp_conn.close()
