@@ -440,3 +440,121 @@
 #         except Exception as e:
 #             print(json.dumps({"error": f"Error fetching external ID for patient {patient_id}: {e}"}))
 #             return None
+
+"""
+Database connection and operations handler for ID mapping.
+"""
+import psycopg2
+import json
+
+
+class Database:
+    """
+    Database connection and operations handler.
+    """
+    
+    def __init__(self, db_config):
+        """
+        Initialize database connection.
+        
+        Args:
+            db_config (dict): Database configuration parameters
+        """
+        self.db_config = db_config
+        self.conn = None
+    
+    def connect(self):
+        """
+        Create a database connection.
+        
+        Returns:
+            bool: True if connection successful, False otherwise
+        """
+        try:
+            self.conn = psycopg2.connect(**self.db_config)
+            return True
+        except Exception as e:
+            print(f"Database connection error: {e}")
+            return False
+    
+    def close(self):
+        """Close the database connection if open."""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+    
+    def get_local_patient_id(self, external_id):
+        """
+        Find the local patient ID based on the Adracare external ID.
+        
+        Args:
+            external_id (str): External patient ID from Adracare
+            
+        Returns:
+            int or None: Local patient ID if found, None otherwise
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT id FROM patients WHERE external_id = %s", 
+                (external_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            return None
+        except Exception as e:
+            print(f"Error finding local patient ID: {e}")
+            return None
+    
+    def get_local_author_id(self, adracare_account_id):
+        """
+        Find the local user ID based on the Adracare created_by_account_id.
+        
+        Args:
+            adracare_account_id (str): Created_by_account_id from Adracare response
+            
+        Returns:
+            int or None: Local user ID if found, None otherwise
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT id FROM users WHERE adracare_account_id = %s",
+                (adracare_account_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            return None
+        except Exception as e:
+            print(f"Error finding local author ID: {e}")
+            return None
+
+    def _format_properly_escaped_sql(self, template, params):
+        """
+        Use psycopg2 to properly format an SQL statement with parameters.
+        
+        Args:
+            template (str): SQL template with %s placeholders
+            params (tuple): Parameters to substitute into the template
+            
+        Returns:
+            str: Properly formatted SQL statement
+        """
+        try:
+            # Use existing connection if available, otherwise create a temporary one
+            if self.conn:
+                cursor = self.conn.cursor()
+            else:
+                temp_conn = psycopg2.connect(**self.db_config)
+                cursor = temp_conn.cursor()
+            formatted_sql = cursor.mogrify(template, params).decode('utf-8')
+            return formatted_sql
+        except Exception as e:
+            print(f"Error formatting SQL: {e}")
+            # Fallback with manual escaping
+            return template.replace("%s", "'{}'").format(*[str(p).replace("'", "''") for p in params])
+        finally:
+            if not self.conn and 'temp_conn' in locals():
+                temp_conn.close()

@@ -623,6 +623,7 @@
 # if __name__ == "__main__":
 #     main()
 
+
 import json
 import asyncio
 import aiohttp
@@ -632,6 +633,7 @@ from concurrent.futures import ThreadPoolExecutor
 from config.settings import load_config
 from api.adracare import extract_notes_data
 from utils.text_processing import extract_text_from_html
+from db.database import Database
 
 
 async def get_auth_token_async(api_base_url, username, password, session):
@@ -730,11 +732,12 @@ async def get_encounter_notes_async(api_base_url, auth_token, patient_id, sessio
             return {"error": error_msg, "data": []}
 
 
-async def process_patient_async(api_base_url, auth_token, patient_id, default_author_id, session):
+async def process_patient_async(db, api_base_url, auth_token, patient_id, default_author_id, session):
     """
     Process encounter notes for a single patient asynchronously.
     
     Args:
+        db (Database): Database connection handler
         api_base_url (str): Adracare API base URL
         auth_token (str): Authentication token for Adracare API
         patient_id (str): External patient ID from Adracare
@@ -779,11 +782,20 @@ async def process_patient_async(api_base_url, auth_token, patient_id, default_au
         patient_result["notes_found"] = len(notes_data)
         
         if notes_data:
-            # Instead of looking up local patient ID, just use the external ID directly
+            local_patient_id = db.get_local_patient_id(patient_id)
+            if not local_patient_id:
+                error_msg = f"Could not find local patient ID for Adracare patient ID: {patient_id}"
+                print(error_msg)
+                patient_result["messages"].append(error_msg)
+                patient_result["error"] = error_msg
+                return patient_result
+            
             for note in notes_data:
+                note["local_patient_id"] = local_patient_id
                 note["external_patient_id"] = patient_id
             
             patient_result["notes_data"] = notes_data
+            patient_result["local_patient_id"] = local_patient_id
             patient_result["external_patient_id"] = patient_id
             patient_result["success"] = True
         else:
@@ -801,23 +813,22 @@ async def process_patient_async(api_base_url, auth_token, patient_id, default_au
     return patient_result
 
 
-def generate_note_sql(note, external_patient_id, default_author_id):
+def generate_note_sql(db, note, local_patient_id, default_author_id):
     """
-    Generate SQL for a single note without database connection.
+    Generate SQL for a single note without executing it.
     
     Args:
+        db (Database): Database connection for ID lookups
         note (dict): Note data
-        external_patient_id (str): External patient ID from Adracare
+        local_patient_id (int): Local patient ID
         default_author_id (int): Default author user ID
         
     Returns:
         str: SQL statement for the note, or None if there's an error
     """
     try:
-        # Extract text from HTML using the existing function
-        raw_note_text = note.get("notes", "")
-        note_text = extract_text_from_html(raw_note_text)
-        
+        # Extract text from HTML
+        note_text = extract_text_from_html(note.get("notes", ""))
         created_at = note.get("created_at")
         updated_at = note.get("updated_at")
         
@@ -828,28 +839,40 @@ def generate_note_sql(note, external_patient_id, default_author_id):
         
         adracare_account_id = note.get("created_by_account_id")
         
-        # Use the Adracare account ID directly or fall back to default
-        author_id = adracare_account_id if adracare_account_id else default_author_id
+        if adracare_account_id is None:
+            print(f"Missing created_by_account_id for note {note.get('id', 'unknown')}, using default_author_id: {default_author_id}")
+            author_id = default_author_id
+        else:
+            author_id = db.get_local_author_id(adracare_account_id)
+            if not author_id:
+                print(f"No user found for adracare_account_id: {adracare_account_id}, using default: {default_author_id}")
+                author_id = default_author_id
         
-        # Create SQL statement with processed text
-        sql_template = f"""
-        INSERT INTO patient_notes (notes, external_patient_id, author_id, created_at, updated_at)
-        VALUES ('{note_text}', '{external_patient_id}', '{author_id}', '{created_at}' AT TIME ZONE 'UTC', '{updated_at}' AT TIME ZONE 'UTC')
+        sql_template = """
+        INSERT INTO patient_notes (notes, patient_id, author_user_id, created_at, updated_at)
+        VALUES (%s, %s, %s, %s AT TIME ZONE 'UTC', %s AT TIME ZONE 'UTC')
         RETURNING id;
         """
         
-        return sql_template
+        params = (note_text, local_patient_id, author_id, created_at, updated_at)
+        sql_statement = db._format_properly_escaped_sql(sql_template, params)
+        
+        if not sql_statement.strip().endswith(';'):
+            sql_statement += ';'
+            
+        return sql_statement
             
     except Exception as e:
         print(f"Error generating SQL for note {note.get('id', 'unknown')}: {e}")
         return None
 
 
-async def write_sql_async(sql_file, notes_data, default_author_id, results_dict):
+async def write_sql_async(db, sql_file, notes_data, default_author_id, results_dict):
     """
-    Generate and write SQL statements asynchronously without DB dependencies.
+    Generate and write SQL statements asynchronously.
     
     Args:
+        db (Database): Database connection handler
         sql_file (str): Path to the SQL output file
         notes_data (list): List of note data dictionaries
         default_author_id (int): Default author user ID
@@ -868,8 +891,9 @@ async def write_sql_async(sql_file, notes_data, default_author_id, results_dict)
                 executor, 
                 lambda: [
                     generate_note_sql(
+                        db,
                         note, 
-                        note["external_patient_id"], 
+                        note["local_patient_id"], 
                         default_author_id
                     ) for note in notes_data
                 ]
@@ -879,7 +903,7 @@ async def write_sql_async(sql_file, notes_data, default_author_id, results_dict)
         async with aiofiles.open(sql_file, "a") as f:
             for i, (note, sql_statement) in enumerate(zip(notes_data, sql_statements)):
                 if sql_statement:
-                    # Add comment with note_id and external_patient_id
+                    # Add comment with note_id and patient_id
                     comment = f"-- note_id: {note.get('id', 'unknown')}, patient_id: {note['external_patient_id']}\n"
                     await f.write(comment)
                     await f.write(sql_statement + "\n\n")
@@ -892,6 +916,7 @@ async def write_sql_async(sql_file, notes_data, default_author_id, results_dict)
                     if note_id:
                         results_dict["processed_notes"][note_id] = {
                             "patient_id": note.get("patient_id"),
+                            "local_patient_id": note["local_patient_id"],
                             "external_patient_id": note["external_patient_id"],
                             "created_at": created_at,
                             "processed_at": datetime.now().isoformat(),
@@ -924,7 +949,13 @@ async def main_async():
             "processed_notes": {}
         }
     
+    # Initialize database connection
+    db = Database(config["db_config"])
+    
     try:
+        if not db.connect():
+            raise Exception("Failed to connect to the database")
+        
         print("Using patient IDs from config...")
         
         # Configure aiohttp session with proper timeout settings
@@ -951,6 +982,7 @@ async def main_async():
                 
                 # Create task for each patient
                 task = process_patient_async(
+                    db, 
                     config["api_base_url"], 
                     auth_token, 
                     patient_id, 
@@ -1007,6 +1039,7 @@ async def main_async():
             if all_notes:
                 print(f"Writing {len(all_notes)} notes to SQL file...")
                 processed_records = await write_sql_async(
+                    db,
                     "output.sql",
                     all_notes,
                     config["default_author_id"],
@@ -1039,6 +1072,9 @@ async def main_async():
             "timestamp": datetime.now().isoformat(),
             "error": str(e)
         })
+    
+    finally:
+        db.close()
     
     # Write results to file
     async with aiofiles.open(results_file, "w") as outfile:

@@ -89,7 +89,6 @@
 #             settings["patient_ids"] = []
 
 #     return settings
-
 """
 Configuration and settings management for the Adracare Import tool.
 """
@@ -114,6 +113,13 @@ def load_config():
         "username": os.getenv("ADRA_USERNAME"),
         "password": os.getenv("ADRA_PASSWORD"),
         "default_author_id": int(os.getenv("DEFAULT_AUTHOR_ID", "0")),
+        "db_config": {
+            "host": os.getenv("DB_HOST", "localhost"),
+            "port": int(os.getenv("DB_PORT", 5432)),
+            "database": os.getenv("DB_DATABASE", "rocketdoctor_development"),
+            "user": os.getenv("DB_USER", "postgres"),
+            "password": os.getenv("DB_PASSWORD", "")
+        }
     }
     
     # Read config.json for patient IDs
