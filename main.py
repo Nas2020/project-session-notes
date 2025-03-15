@@ -623,8 +623,6 @@
 # if __name__ == "__main__":
 #     main()
 
-
-
 import json
 import asyncio
 import aiohttp
@@ -633,6 +631,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from config.settings import load_config
 from api.adracare import extract_notes_data
+from utils.text_processing import extract_text_from_html
 
 
 async def get_auth_token_async(api_base_url, username, password, session):
@@ -802,6 +801,50 @@ async def process_patient_async(api_base_url, auth_token, patient_id, default_au
     return patient_result
 
 
+def generate_note_sql(note, external_patient_id, default_author_id):
+    """
+    Generate SQL for a single note without database connection.
+    
+    Args:
+        note (dict): Note data
+        external_patient_id (str): External patient ID from Adracare
+        default_author_id (int): Default author user ID
+        
+    Returns:
+        str: SQL statement for the note, or None if there's an error
+    """
+    try:
+        # Extract text from HTML using the existing function
+        raw_note_text = note.get("notes", "")
+        note_text = extract_text_from_html(raw_note_text)
+        
+        created_at = note.get("created_at")
+        updated_at = note.get("updated_at")
+        
+        # Skip notes with missing created_at or updated_at
+        if created_at is None or updated_at is None:
+            print(f"Skipping note {note.get('id', 'unknown')} due to missing created_at or updated_at")
+            return None
+        
+        adracare_account_id = note.get("created_by_account_id")
+        
+        # Use the Adracare account ID directly or fall back to default
+        author_id = adracare_account_id if adracare_account_id else default_author_id
+        
+        # Create SQL statement with processed text
+        sql_template = f"""
+        INSERT INTO patient_notes (notes, external_patient_id, author_id, created_at, updated_at)
+        VALUES ('{note_text}', '{external_patient_id}', '{author_id}', '{created_at}' AT TIME ZONE 'UTC', '{updated_at}' AT TIME ZONE 'UTC')
+        RETURNING id;
+        """
+        
+        return sql_template
+            
+    except Exception as e:
+        print(f"Error generating SQL for note {note.get('id', 'unknown')}: {e}")
+        return None
+
+
 async def write_sql_async(sql_file, notes_data, default_author_id, results_dict):
     """
     Generate and write SQL statements asynchronously without DB dependencies.
@@ -859,49 +902,6 @@ async def write_sql_async(sql_file, notes_data, default_author_id, results_dict)
         print(f"Error writing SQL: {e}")
     
     return processed_records
-
-
-def generate_note_sql(note, external_patient_id, default_author_id):
-    """
-    Generate SQL for a single note without database connection.
-    
-    Args:
-        note (dict): Note data
-        external_patient_id (str): External patient ID from Adracare
-        default_author_id (int): Default author user ID
-        
-    Returns:
-        str: SQL statement for the note, or None if there's an error
-    """
-    try:
-        # Since we can't process HTML directly without the dependency, let's treat it as plain text
-        # You'll want to add any HTML parsing if necessary
-        note_text = note.get("notes", "").replace("'", "''")  # Simple SQL escaping
-        created_at = note.get("created_at")
-        updated_at = note.get("updated_at")
-        
-        # Skip notes with missing created_at or updated_at
-        if created_at is None or updated_at is None:
-            print(f"Skipping note {note.get('id', 'unknown')} due to missing created_at or updated_at")
-            return None
-        
-        adracare_account_id = note.get("created_by_account_id")
-        
-        # Use the Adracare account ID directly or fall back to default
-        author_id = adracare_account_id if adracare_account_id else default_author_id
-        
-        # Create a SQL statement with a placeholder for local patient ID (to be replaced later)
-        sql_template = f"""
-        INSERT INTO patient_notes (notes, external_patient_id, author_id, created_at, updated_at)
-        VALUES ('{note_text}', '{external_patient_id}', '{author_id}', '{created_at}' AT TIME ZONE 'UTC', '{updated_at}' AT TIME ZONE 'UTC')
-        RETURNING id;
-        """
-        
-        return sql_template
-            
-    except Exception as e:
-        print(f"Error generating SQL for note {note.get('id', 'unknown')}: {e}")
-        return None
 
 
 async def main_async():

@@ -90,7 +90,6 @@
 
 #     return settings
 
-
 """
 Configuration and settings management for the Adracare Import tool.
 """
