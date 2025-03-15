@@ -255,7 +255,7 @@ async def get_auth_token_async(api_base_url, username, password, session):
         return data["jwt"]
 
 
-async def get_encounter_notes_async(api_base_url, auth_token, patient_id, session):
+async def get_encounter_notes_async(api_base_url, auth_token, patient_id, session, timeout=60, max_retries=3, retry_delay=5):
     """
     Get encounter notes for a specific patient from the Adracare API asynchronously.
     
@@ -264,6 +264,9 @@ async def get_encounter_notes_async(api_base_url, auth_token, patient_id, sessio
         auth_token: JWT authentication token
         patient_id: Adracare patient ID
         session: aiohttp ClientSession
+        timeout: Timeout in seconds for the request (default: 60)
+        max_retries: Maximum number of retry attempts (default: 3)
+        retry_delay: Delay in seconds between retries (default: 5)
         
     Returns:
         dict: JSON response containing encounter notes
@@ -276,15 +279,46 @@ async def get_encounter_notes_async(api_base_url, auth_token, patient_id, sessio
         "Authorization": f"Bearer {auth_token}"
     }
     
-    try:
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                error_message = f"Failed to get encounter notes: {response.status} - {await response.text()}"
-                return {"error": error_message, "data": []}
+    for attempt in range(max_retries):
+        try:
+            async with session.get(url, headers=headers, timeout=timeout) as response:
+                if response.status != 200:
+                    error_message = f"Failed to get encounter notes: {response.status} - {await response.text()}"
+                    print(f"Attempt {attempt+1}/{max_retries} failed: {error_message}")
+                    
+                    # If this is not the last attempt, wait and try again
+                    if attempt < max_retries - 1:
+                        print(f"Waiting {retry_delay} seconds before retrying...")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    
+                    return {"error": error_message, "data": []}
+                
+                # Successfully got the response
+                return await response.json()
+                
+        except asyncio.TimeoutError:
+            print(f"Attempt {attempt+1}/{max_retries} timed out after {timeout} seconds")
             
-            return await response.json()
-    except Exception as e:
-        return {"error": f"Exception occurred: {str(e)}", "data": []}
+            # If this is not the last attempt, wait and try again
+            if attempt < max_retries - 1:
+                print(f"Waiting {retry_delay} seconds before retrying...")
+                await asyncio.sleep(retry_delay)
+                continue
+            
+            return {"error": f"Request timed out after {max_retries} attempts", "data": []}
+            
+        except Exception as e:
+            error_msg = f"Exception occurred: {str(e)}"
+            print(f"Attempt {attempt+1}/{max_retries} failed: {error_msg}")
+            
+            # If this is not the last attempt, wait and try again
+            if attempt < max_retries - 1:
+                print(f"Waiting {retry_delay} seconds before retrying...")
+                await asyncio.sleep(retry_delay)
+                continue
+            
+            return {"error": error_msg, "data": []}
 
 
 async def process_patient_async(db, api_base_url, auth_token, patient_id, default_author_id, session):
@@ -316,8 +350,10 @@ async def process_patient_async(db, api_base_url, auth_token, patient_id, defaul
     patient_result["messages"].append(msg)
     
     try:
+        # Use the updated function with retry logic and longer timeout
         encounter_notes_response = await get_encounter_notes_async(
-            api_base_url, auth_token, patient_id, session
+            api_base_url, auth_token, patient_id, session, 
+            timeout=120, max_retries=3, retry_delay=5
         )
         
         if "error" in encounter_notes_response:
@@ -454,8 +490,11 @@ async def main_async():
         print("Fetching patient IDs from providers...")
         config = load_config(fetch_patient_ids=True, db=db)
         
+        # Configure aiohttp session with proper timeout settings
+        timeout = aiohttp.ClientTimeout(total=120)  # 2 minutes total timeout
+
         # Create aiohttp session for all HTTP requests
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             print("Getting authentication token...")
             auth_token = await get_auth_token_async(
                 config["api_base_url"],
@@ -484,8 +523,17 @@ async def main_async():
                 )
                 tasks.append(task)
             
-            # Wait for all tasks to complete
-            patient_results = await asyncio.gather(*tasks)
+            # Wait for all tasks to complete with a maximum of 10 concurrent tasks
+            # This helps prevent overloading the server with too many simultaneous requests
+            patient_results = []
+            for batch in [tasks[i:i+10] for i in range(0, len(tasks), 10)]:
+                batch_results = await asyncio.gather(*batch)
+                patient_results.extend(batch_results)
+                # Add a small delay between batches to reduce server load
+                if len(tasks) > 10:
+                    await asyncio.sleep(2)
+                    
+                print(f"Processed batch {i+1}/{len(tasks)//10 + (1 if len(tasks) % 10 > 0 else 0)}")
             
             # Filter out failed patients
             successful_patients = [p for p in patient_results if p.get("success", False)]
